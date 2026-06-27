@@ -16,6 +16,7 @@ typedef struct {
     int current_line;
     int cursor_x;
     int scroll_y;
+    int is_modified;
 } UndoState;
 
 UndoState undo_stack[MAX_UNDO];
@@ -29,6 +30,7 @@ int cursor_x = 0;
 int scroll_y = 0;
 char current_filename[256] = "untitled.txt";
 char status_msg[256] = "";
+int is_modified = 0;
 
 void save_undo_state() {
     // If the stack is full, shift everything left to discard the oldest state
@@ -47,6 +49,9 @@ void save_undo_state() {
     undo_stack[undo_stack_top].current_line = current_line;
     undo_stack[undo_stack_top].cursor_x = cursor_x;
     undo_stack[undo_stack_top].scroll_y = scroll_y;
+    undo_stack[undo_stack_top].is_modified = is_modified;
+
+    is_modified = 1;
 }
 
 void undo() {
@@ -61,6 +66,7 @@ void undo() {
     current_line = undo_stack[undo_stack_top].current_line;
     cursor_x = undo_stack[undo_stack_top].cursor_x;
     scroll_y = undo_stack[undo_stack_top].scroll_y;
+    is_modified = undo_stack[undo_stack_top].is_modified;
 
     undo_stack_top--; // Pop it off
     snprintf(status_msg, sizeof(status_msg), "Undo!");
@@ -84,11 +90,13 @@ void load_file(const char *filename) {
         scroll_y = 0;
         current_line = 0;
         cursor_x = 0;
+        is_modified = 0;
     } else {
         // If file doesn't exist, treat it as a new file under that name
         strncpy(current_filename, filename, sizeof(current_filename) - 1);
         line_count = 1;
         buffer[0][0] = '\0';
+        is_modified = 0;
     }
 }
 
@@ -157,6 +165,8 @@ void save_file() {
         }
         fclose(fp);
 
+        is_modified = 0;
+
         snprintf(status_msg, sizeof(status_msg), "Saved successfully to '%s'!", current_filename);
     } else {
         mvprintw(LINES - 1, 0, "Error: Could not save file! Press any key...");
@@ -176,7 +186,13 @@ void draw_screen() {
     clrtoeol();
     // Highlight the file name with our attention color pair
     attron(COLOR_PAIR(1));
-    printw(" File: %s", current_filename);
+
+    if (is_modified) {
+        printw(" File: %s * (unsaved)", current_filename);
+    } else {
+        printw(" File: %s ", current_filename);
+    }
+
     attroff(COLOR_PAIR(1));
 
     // 2. Draw the thin top horizontal separator line (Row 1)
@@ -552,6 +568,38 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
+
+        } else if (ch == KEY_DC || ch == 330) {
+            // Handle Forward Delete (Delete key)
+            int len = strlen(buffer[current_line]);
+            
+            // Case 1: Cursor is within the text, delete the character directly under it
+            if (cursor_x < len) {
+                save_undo_state();
+                // Shift everything after the cursor left by 1 position
+                memmove(&buffer[current_line][cursor_x], &buffer[current_line][cursor_x + 1], len - cursor_x);
+            } 
+            // Case 2: Cursor is at the absolute end of the line, merge the NEXT line up
+            else if (current_line < line_count - 1) {
+                int next_line = current_line + 1;
+                int next_len = strlen(buffer[next_line]);
+                
+                // Ensure merging won't overflow the maximum allowable line buffer width
+                if (len + next_len < MAX_LINE_LEN) {
+                    save_undo_state();
+                    
+                    // Append the contents of the next line directly onto this one
+                    strcat(buffer[current_line], buffer[next_line]);
+                    
+                    // Shift all subsequent lines up by 1 slot to fill the gap
+                    for (int i = next_line; i < line_count - 1; i++) {
+                        strcpy(buffer[i], buffer[i + 1]);
+                    }
+                    buffer[line_count - 1][0] = '\0'; // Clear the trailing duplicated row
+                    line_count--;
+                }
+            }
+
         } else if (ch >= 32 && ch <= 126) {
             // Handle typing a character
             int len = strlen(buffer[current_line]);
