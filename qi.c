@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.15 (2026)
+ * Version: 1.0.16 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.15"
+#define VERSION "1.0.16"
 
 typedef struct {
     char **buffer;
@@ -47,17 +47,22 @@ int is_modified = 0;
 int line_modified[MAX_LINES] = {0};
 
 void save_undo_state() {
-    // If the stack is full, shift everything left and free the oldest state's memory
+    // If the stack is full, shift everything left and free the oldest state's memory safely
     if (undo_stack_top >= MAX_UNDO - 1) {
         if (undo_stack[0].buffer != NULL) {
             for (int j = 0; j < undo_stack[0].line_count; j++) {
-                free(undo_stack[0].buffer[j]);
+                if (undo_stack[0].buffer[j] != NULL) {
+                    free(undo_stack[0].buffer[j]);
+                }
             }
             free(undo_stack[0].buffer);
+            undo_stack[0].buffer = NULL;
         }
         for (int i = 0; i < MAX_UNDO - 1; i++) {
             undo_stack[i] = undo_stack[i + 1];
         }
+        // Explicitly clear out the old top position so it doesn't leave trailing garbage pointers
+        undo_stack[MAX_UNDO - 1].buffer = NULL;
         undo_stack_top--;
     }
 
@@ -66,9 +71,12 @@ void save_undo_state() {
     // Clear out any old allocations in this slot before overwriting it
     if (undo_stack[undo_stack_top].buffer != NULL) {
         for (int j = 0; j < undo_stack[undo_stack_top].line_count; j++) {
-            free(undo_stack[undo_stack_top].buffer[j]);
+            if (undo_stack[undo_stack_top].buffer[j] != NULL) {
+                free(undo_stack[undo_stack_top].buffer[j]);
+            }
         }
         free(undo_stack[undo_stack_top].buffer);
+        undo_stack[undo_stack_top].buffer = NULL;
     }
 
     // Capture standard integers
@@ -1036,6 +1044,9 @@ int main(int argc, char *argv[]) {
     // Start tracking
     tracker_init(MAX_LINES, MAX_LINE_LEN);
 
+    // Explicitly zero out the undo stack structure
+    memset(undo_stack, 0, sizeof(undo_stack));
+
     // Check if a filename argument was provided
     if (argc > 1) {
         load_file(argv[1]);
@@ -1096,24 +1107,28 @@ int main(int argc, char *argv[]) {
             if (current_line > 0) {
                 current_line--;
                 
-                // If the cursor moves above the top visible line, slide the camera up
-                if (current_line < scroll_y) {
-                    scroll_y = current_line;
+                // --- SCROLLOFF: Maintain a 3-line margin at the top ---
+                if (current_line - scroll_y < 3) {
+                    scroll_y = current_line - 3;
+                    if (scroll_y < 0) scroll_y = 0;
                 }
 
                 int len = strlen(buffer[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
-      } else if (ch == KEY_DOWN) {
+        } else if (ch == KEY_DOWN) {
             if (current_line < line_count - 1) {
                 current_line++;
                 
-                // Track the max available vertical rows for text
                 int max_displayable_lines = LINES - 4;
                 
-                // If the active line pushes past the bottom boundary, slide the camera down
-                if (current_line >= scroll_y + max_displayable_lines) {
+                // --- SCROLLOFF: Maintain a 3-line margin at the bottom ---
+                if ((scroll_y + max_displayable_lines) - current_line <= 3) {
                     scroll_y++;
+                    if (scroll_y > line_count - max_displayable_lines) {
+                        scroll_y = line_count - max_displayable_lines;
+                    }
+                    if (scroll_y < 0) scroll_y = 0;
                 }
 
                 int len = strlen(buffer[current_line]);
@@ -1264,12 +1279,17 @@ int main(int argc, char *argv[]) {
                 cursor_x = 0;
                 line_count++;
 
-                // --- NEW: Slide viewport camera up if cursor pushes past bottom edge ---
+                // --- SCROLLOFF: Slide viewport camera if Enter pushes into the bottom margin ---
                 int max_displayable_lines = LINES - 4;
-                if (current_line >= scroll_y + max_displayable_lines) {
+                if ((scroll_y + max_displayable_lines) - current_line <= 3) {
                     scroll_y++;
+                    if (scroll_y > line_count - max_displayable_lines) {
+                        scroll_y = line_count - max_displayable_lines;
+                    }
+                    if (scroll_y < 0) scroll_y = 0;
                 }
             }
+
         } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             // Handle Backspace
             if (cursor_x > 0) {
@@ -1328,12 +1348,13 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-        } else if (ch >= 32 && ch <= 126) {
+            } else if (ch >= 32 && ch <= 126) {
             // Handle typing a character
             int len = strlen(buffer[current_line]);
             if (cursor_x <= len) {
 
-                if (cursor_x == 0 || buffer[current_line][cursor_x - 1] == ' ') {
+                // Only take an undo snapshot when starting a new word or at line start
+                if (cursor_x == 0 || (buffer[current_line][cursor_x - 1] == ' ' && ch != ' ')) {
                     save_undo_state();
                 }
 
@@ -1343,7 +1364,7 @@ int main(int argc, char *argv[]) {
                 cursor_x++;
             }
         }
-    } // <--- Closes the while(1) loop
+	} // <--- Closes the while(1) loop
 
     // --- CLEAN UP REMAINING ALLOCATIONS BEFORE EXIT ---
     while (undo_stack_top >= 0) {
