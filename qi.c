@@ -10,7 +10,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.6"
+#define VERSION "1.0.7"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -33,6 +33,7 @@ int scroll_y = 0;
 char current_filename[256] = "untitled.txt";
 char status_msg[256] = "";
 int is_modified = 0;
+int line_modified[MAX_LINES] = {0};
 
 void save_undo_state() {
     // If the stack is full, shift everything left to discard the oldest state
@@ -78,6 +79,9 @@ void undo() {
 // 1. Silent file loader used by both main() and the menu
 void load_file(const char *filename) {
     undo_stack_top = -1; // --- ADD THIS TO CLEAR UNDO ON LOAD ---
+
+    memset(line_modified, 0, sizeof(line_modified));
+
     FILE *fp = fopen(filename, "r");
     if (fp) {
         line_count = 0;
@@ -169,6 +173,8 @@ void save_file() {
 
         is_modified = 0;
 
+        memset(line_modified, 0, sizeof(line_modified));
+
         snprintf(status_msg, sizeof(status_msg), "Saved successfully to '%s'!", current_filename);
     } else {
         mvprintw(LINES - 1, 0, "Error: Could not save file! Press any key...");
@@ -189,14 +195,17 @@ void draw_screen() {
     init_pair(4, COLOR_MAGENTA, COLOR_BLACK);// Strings & Numbers
     init_pair(5, COLOR_GREEN, COLOR_BLACK);  // Comments (//)
 
+    // --- NEW COLOR PAIR FOR NEW TEXT ---
+    init_pair(6, COLOR_YELLOW, COLOR_BLACK);
+
     // 1. Draw the top header area (Row 0)
     move(0, 0);
     clrtoeol();
     attron(COLOR_PAIR(1));
     if (is_modified) {
-        printw(" File: %s * (unsaved)", current_filename);
+        printw(" File: %s * (unsaved) (%d lines)", current_filename, line_count);
     } else {
-        printw(" File: %s ", current_filename);
+        printw(" File: %s (%d lines)", current_filename, line_count);
     }
     attroff(COLOR_PAIR(1));
 
@@ -323,11 +332,17 @@ void draw_screen() {
                 printw("%c", line[j]);
                 attroff(COLOR_PAIR(4));
             } else {
-                printw("%c", line[j]);
+                // UNIQUE UNSAVED TEXT COLOR LOGIC
+                if (line_modified[file_line_index]) {
+                    attron(COLOR_PAIR(6));
+                    printw("%c", line[j]);
+                    attroff(COLOR_PAIR(6));
+                } else { 
+                    printw("%c", line[j]);
             }
         }
     }
-
+}
     // 3. Draw the bottom horizontal separator line (LINES - 2)
     move(LINES - 2, 0);
     clrtoeol();
@@ -997,6 +1012,7 @@ int main(int argc, char *argv[]) {
 
                 memmove(&buffer[current_line][cursor_x + 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
                 buffer[current_line][cursor_x] = (char)ch;
+                line_modified[current_line] = 1;
                 cursor_x++;
             }
         }
