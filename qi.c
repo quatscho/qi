@@ -180,6 +180,7 @@ void draw_screen() {
     clear();
     start_color();
     init_pair(1, COLOR_YELLOW, COLOR_BLACK); 
+    init_pair(2, COLOR_RED, COLOR_BLACK);
 
     // 1. Draw the top header area (Row 0)
     move(0, 0);
@@ -623,7 +624,26 @@ int main(int argc, char *argv[]) {
 
         status_msg[0] = '\0';
 
-        if (ch == CTRL_KEY('q')) break;
+        if (ch == CTRL_KEY('q')) {
+            if (is_modified) {
+                mvprintw(LINES - 1, 0, "");
+                clrtoeol();
+
+                attron(COLOR_PAIR(2)); // --- TURN ON RED ---
+                printw("Unsaved changes! Quit anyway? (y/n): ");
+                attroff(COLOR_PAIR(2)); // --- TURN OFF RED ---                
+
+                refresh();
+                int confirm = getch();
+                if (confirm == 'y' || confirm == 'Y') {
+                    break; 
+                } else {
+                    continue; // Skip the rest of the loop and redraw the screen safely
+                }
+            } else {
+                break; // No changes, exit immediately
+            }
+        }
         else if (ch == CTRL_KEY('o')) interactive_open();
         else if (ch == CTRL_KEY('w')) save_file();
         else if (ch == CTRL_KEY('f')) find_text();
