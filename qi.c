@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.9 (2026)
+ * Version: 1.0.10 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.9"
+#define VERSION "1.0.10"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -117,34 +117,59 @@ void load_file(const char *filename) {
     }
 }
 
-
 // 2. Interactive menu command when you press Ctrl+O
 void interactive_open() {
     char filename[256];
-    echo();
-    
-    // Using raw() now instead of cbreak(), so we toggle raw() modes
-    noraw(); 
+    int idx = 0;
+    filename[0] = '\0';
 
-    mvprintw(LINES - 1, 0, "Enter filename to open: ");
+    // Keep raw() active so we can catch individual keys like ESC instantly!
+    echo();
+
+    mvprintw(LINES - 1, 0, "Enter filename to open (ESC to cancel): ");
     clrtoeol(); 
     refresh();  
 
-    getstr(filename);
+    while (idx < (int)sizeof(filename) - 1) {
+        int ch = getch();
 
-    noecho();
-    raw(); 
+        if (ch == 27) { // ESC key caught instantly
+            noecho();
+            status_msg[0] = '\0';
+            return;
+        }
+        else if (ch == 10 || ch == 13) { // Enter key finishes input
+            break;
+        }
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) { // Handle backspace
+            if (idx > 0) {
+                idx--;
+                filename[idx] = '\0';
+                // Move back, wipe character visually, and step back again
+                mvprintw(LINES - 1, 40 + idx, " ");
+                move(LINES - 1, 40 + idx);
+                refresh();
+            }
+        }
+        else if (ch >= 32 && ch <= 126) { // Visible characters
+            filename[idx++] = (char)ch;
+            filename[idx] = '\0';
+        }
+    }
+
+    noecho(); 
 
     // Only load if the user actually typed a name
     if (strlen(filename) > 0) {
         FILE *fp = fopen(filename, "r");
         if (fp) {
             fclose(fp);
-            load_file(filename); // Pass it to our silent loader
+            load_file(filename); // Pass it to our silent loader[span_4](start_span)[span_4](end_span)
         } else {
             mvprintw(LINES - 1, 0, "File not found! Press any key...");
             clrtoeol();
             refresh();
+            raw(); // Ensure raw state is safe before blocking
             getch();
         }
     }
@@ -381,17 +406,42 @@ void draw_screen() {
 }
 
 void find_text() {
-    char search_str[128] = "";
-    echo();
-    noraw();
+    char search_str[128];
+    int idx = 0;
+    search_str[0] = '\0';
+    const char *prompt = "Find: ";
+    int prompt_len = strlen(prompt);
 
-    mvprintw(LINES - 1, 0, "Find: ");
+    echo();
+    mvprintw(LINES - 1, 0, "%s", prompt);
     clrtoeol();
     refresh();
-    getstr(search_str);
 
+    while (idx < (int)sizeof(search_str) - 1) {
+        int ch = getch();
+        if (ch == 27) { // ESC
+            noecho();
+            status_msg[0] = '\0';
+            return;
+        }
+        else if (ch == 10 || ch == 13) { // Enter
+            break;
+        }
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (idx > 0) {
+                idx--;
+                search_str[idx] = '\0';
+                mvprintw(LINES - 1, prompt_len + idx, " ");
+                move(LINES - 1, prompt_len + idx);
+                refresh();
+            }
+        }
+        else if (ch >= 32 && ch <= 126) {
+            search_str[idx++] = (char)ch;
+            search_str[idx] = '\0';
+        }
+    }
     noecho();
-    raw();
 
     if (strlen(search_str) == 0) return;
 
@@ -461,26 +511,62 @@ void find_text() {
 }
 
 void replace_text() {
-    char search_str[128] = "";
-    char replace_str[128] = "";
+    char search_str[128];
+    char replace_str[128];
+    int idx = 0;
+    search_str[0] = '\0';
+    replace_str[0] = '\0';
+    
     echo();
-    noraw();
 
-    // 1. Get Search Term
-    mvprintw(LINES - 1, 0, "Find text to replace: ");
+    // Prompt 1: Find text
+    const char *prompt1 = "Find text to replace: ";
+    int p1_len = strlen(prompt1);
+    mvprintw(LINES - 1, 0, "%s", prompt1);
     clrtoeol();
     refresh();
-    getstr(search_str);
-    if (strlen(search_str) == 0) { noecho(); raw(); return; }
 
-    // 2. Get Replacement Term
-    mvprintw(LINES - 1, 0, "Replace with: ");
+    while (idx < (int)sizeof(search_str) - 1) {
+        int ch = getch();
+        if (ch == 27) { noecho(); status_msg[0] = '\0'; return; }
+        else if (ch == 10 || ch == 13) break;
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (idx > 0) {
+                idx--; search_str[idx] = '\0';
+                mvprintw(LINES - 1, p1_len + idx, " ");
+                move(LINES - 1, p1_len + idx); refresh();
+            }
+        }
+        else if (ch >= 32 && ch <= 126) {
+            search_str[idx++] = (char)ch; search_str[idx] = '\0';
+        }
+    }
+    if (strlen(search_str) == 0) { noecho(); return; }
+
+    // Prompt 2: Replace with
+    idx = 0;
+    const char *prompt2 = "Replace with: ";
+    int p2_len = strlen(prompt2);
+    mvprintw(LINES - 1, 0, "%s", prompt2);
     clrtoeol();
     refresh();
-    getstr(replace_str);
 
+    while (idx < (int)sizeof(replace_str) - 1) {
+        int ch = getch();
+        if (ch == 27) { noecho(); status_msg[0] = '\0'; return; }
+        else if (ch == 10 || ch == 13) break;
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (idx > 0) {
+                idx--; replace_str[idx] = '\0';
+                mvprintw(LINES - 1, p2_len + idx, " ");
+                move(LINES - 1, p2_len + idx); refresh();
+            }
+        }
+        else if (ch >= 32 && ch <= 126) {
+            replace_str[idx++] = (char)ch; replace_str[idx] = '\0';
+        }
+    }
     noecho();
-    raw();
 
     // 3. Collect Match Coordinates
     struct { int line; int col; } matches[500];
@@ -527,7 +613,7 @@ void replace_text() {
         int choice = 'n';
         if (!force_all) {
             snprintf(status_msg, sizeof(status_msg), 
-                     "Match %d of %d: Replace? (y: Yes | n: No | a: All | q: Quit)", 
+                     "Match %d of %d: Replace? (y: Yes | n: No | a: All | q: Quit/ESC)", 
                      current_idx + 1, match_count);
             draw_screen();
             choice = getch();
@@ -578,38 +664,60 @@ void replace_text() {
 
 void goto_line() {
     char line_input[32];
-    echo();
-    noraw(); // Temporarily disable raw mode for clean typing/Enter handling
+    int idx = 0;
+    line_input[0] = '\0';
+    const char *prompt = "Go to line: ";
+    int prompt_len = strlen(prompt);
 
-    mvprintw(LINES - 1, 0, "Go to line: ");
+    echo();
+    mvprintw(LINES - 1, 0, "%s", prompt);
     clrtoeol();
     refresh();
 
-    getstr(line_input);
-
+    while (idx < (int)sizeof(line_input) - 1) {
+        int ch = getch();
+        if (ch == 27) { // ESC
+            noecho();
+            status_msg[0] = '\0';
+            return;
+        }
+        else if (ch == 10 || ch == 13) { // Enter
+            break;
+        }
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (idx > 0) {
+                idx--;
+                line_input[idx] = '\0';
+                mvprintw(LINES - 1, prompt_len + idx, " ");
+                move(LINES - 1, prompt_len + idx);
+                refresh();
+            }
+        }
+        else if (ch >= 32 && ch <= 126) {
+            // Only accept digits for Go To Line configuration
+            if (isdigit((unsigned char)ch)) {
+                line_input[idx++] = (char)ch;
+                line_input[idx] = '\0';
+            }
+        }
+    }
     noecho();
-    raw(); // Re-enable raw mode
 
     if (strlen(line_input) == 0) return;
 
-    // Convert the string input into an integer index (1-based from user input)
     int target = atoi(line_input);
 
-    // Bound check: Ensure the target line exists within the document
     if (target < 1 || target > line_count) {
         snprintf(status_msg, sizeof(status_msg), "Line %d out of bounds! (Total lines: %d)", target, line_count);
         return;
     }
 
-    // Convert to 0-based index for our internal buffer array
     current_line = target - 1;
-    cursor_x = 0; // Snap cursor to the beginning of the targeted line
+    cursor_x = 0;
 
-    // Center the viewport camera vertically on the target line
     int max_displayable_lines = LINES - 4;
     scroll_y = current_line - (max_displayable_lines / 2);
     
-    // Safety boundaries for the camera scroll
     if (scroll_y < 0) scroll_y = 0;
     if (scroll_y > line_count - max_displayable_lines) {
         scroll_y = line_count - max_displayable_lines;
@@ -619,78 +727,90 @@ void goto_line() {
 
 void delete_lines_interactive() {
     char input[256];
-    echo();
-    noraw(); // Temporarily disable raw mode for clean typing[span_3](start_span)[span_3](end_span)
+    int idx = 0;
+    input[0] = '\0';
+    const char *prompt = "Delete lines (e.g., 3, 5, 10-25): ";
+    int prompt_len = strlen(prompt);
 
-    mvprintw(LINES - 1, 0, "Delete lines (e.g., 3, 5, 10-25): ");
+    echo();
+    mvprintw(LINES - 1, 0, "%s", prompt);
     clrtoeol();
     refresh();
 
-    getstr(input);
-
+    while (idx < (int)sizeof(input) - 1) {
+        int ch = getch();
+        if (ch == 27) { // ESC
+            noecho();
+            status_msg[0] = '\0';
+            return;
+        }
+        else if (ch == 10 || ch == 13) { // Enter
+            break;
+        }
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (idx > 0) {
+                idx--;
+                input[idx] = '\0';
+                mvprintw(LINES - 1, prompt_len + idx, " ");
+                move(LINES - 1, prompt_len + idx);
+                refresh();
+            }
+        }
+        else if (ch >= 32 && ch <= 126) {
+            input[idx++] = (char)ch;
+            input[idx] = '\0';
+        }
+    }
     noecho();
-    raw(); // Re-enable raw mode[span_4](start_span)[span_4](end_span)
 
     if (strlen(input) == 0) return;
 
-    // Create a boolean-like array to flag lines marked for deletion (0-indexed)
-    // Initialize everything to 0 (don't delete)
     char to_delete[MAX_LINES];
     memset(to_delete, 0, sizeof(to_delete));
 
-    // Save a single undo checkpoint before we make any changes[span_5](start_span)[span_5](end_span)
     save_undo_state();
 
-    // Parse the input string
     char *token = strtok(input, ",");
     while (token != NULL) {
-        // Trim leading spaces if any
         while (*token == ' ') token++;
 
-        // Check if this token defines a range (e.g., "10-25")
         char *dash = strchr(token, '-');
         if (dash != NULL) {
             int start = atoi(token);
             int end = atoi(dash + 1);
 
-            // Bound check and flag the entire range
             if (start > 0 && end >= start) {
                 for (int i = start; i <= end; i++) {
                     if (i <= line_count) {
-                        to_delete[i - 1] = 1; // Convert to 0-indexed
+                        to_delete[i - 1] = 1;
                     }
                 }
             }
         } else {
-            // It's a single line number
             int line_num = atoi(token);
             if (line_num > 0 && line_num <= line_count) {
-                to_delete[line_num - 1] = 1; // Convert to 0-indexed
+                to_delete[line_num - 1] = 1;
             }
         }
         token = strtok(NULL, ",");
     }
 
-    // Process deletions from the BOTTOM UP to preserve indices[span_6](start_span)[span_6](end_span)
     int deleted_count = 0;
     for (int i = line_count - 1; i >= 0; i--) {
         if (to_delete[i]) {
-            // Shift all subsequent lines down[span_7](start_span)[span_7](end_span)
             for (int j = i; j < line_count - 1; j++) {
-                strcpy(buffer[j], buffer[j + 1]); //[span_8](start_span)[span_8](end_span)
+                strcpy(buffer[j], buffer[j + 1]); 
             }
-            buffer[line_count - 1][0] = '\0'; // Clear the trailing duplicated line[span_9](start_span)[span_9](end_span)
-            line_count--; //[span_10](start_span)[span_10](end_span)
+            buffer[line_count - 1][0] = '\0'; 
+            line_count--; 
             deleted_count++;
 
-            // If we deleted the current line or a line above it, adjust cursor tracking
             if (i <= current_line && current_line > 0) {
                 current_line--;
             }
         }
     }
 
-    // Edge case: If we deleted everything, leave one blank line
     if (line_count == 0) {
         line_count = 1;
         buffer[0][0] = '\0';
@@ -698,18 +818,16 @@ void delete_lines_interactive() {
         cursor_x = 0;
     }
 
-    // Ensure cursor column safety on the current line[span_11](start_span)[span_11](end_span)
-    int len = strlen(buffer[current_line]); //[span_12](start_span)[span_12](end_span)
-    if (cursor_x > len) cursor_x = len; //[span_13](start_span)[span_13](end_span)
+    int len = strlen(buffer[current_line]); 
+    if (cursor_x > len) cursor_x = len; 
 
-    // Ensure the viewport camera isn't stranded past the end of the file
     int max_displayable_lines = LINES - 4;
     if (scroll_y > line_count - max_displayable_lines) {
         scroll_y = line_count - max_displayable_lines;
     }
     if (scroll_y < 0) scroll_y = 0;
 
-    snprintf(status_msg, sizeof(status_msg), "Deleted %d line(s).", deleted_count); //[span_14](start_span)[span_14](end_span)
+    snprintf(status_msg, sizeof(status_msg), "Deleted %d line(s).", deleted_count); 
 }
 
 void show_help_window() {
@@ -771,6 +889,7 @@ int main(int argc, char *argv[]) {
 
     // 2. Initialize ncurses completely
     initscr();
+    set_escdelay(25);
     raw();
     keypad(stdscr, TRUE);
     start_color();
