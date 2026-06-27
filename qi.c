@@ -256,45 +256,85 @@ void draw_screen() {
 
     refresh();
 }
-        
+
 void find_text() {
-    char search_query[256];
+    char search_str[128] = "";
     echo();
-    noraw(); // Temporarily disable raw mode for clean typing/Enter handling
+    noraw();
 
     mvprintw(LINES - 1, 0, "Find: ");
     clrtoeol();
     refresh();
-
-    getstr(search_query);
+    getstr(search_str);
 
     noecho();
-    raw(); // Re-enable raw mode
+    raw();
 
-    if (strlen(search_query) == 0) return;
+    if (strlen(search_str) == 0) return;
 
-    // Search sequentially starting from the top of the file
+    // Structure to hold coordinates of matches
+    struct { int line; int col; } matches[500];
+    int match_count = 0;
+    int current_match_idx = 0;
+
+    // 1. Scan entire file buffer for occurrences
     for (int i = 0; i < line_count; i++) {
-        char *match = strstr(buffer[i], search_query);
-        if (match != NULL) {
-            current_line = i;
-            cursor_x = match - buffer[i]; // Calculate the column offset index
-
-            // Adjust the viewport camera so the match is visibly centered/on-screen
-            int max_displayable_lines = LINES - 4;
-            if (current_line < scroll_y || current_line >= scroll_y + max_displayable_lines) {
-                scroll_y = current_line - (max_displayable_lines / 2);
-                if (scroll_y < 0) scroll_y = 0;
+        char *ptr = buffer[i];
+        while ((ptr = strstr(ptr, search_str)) != NULL) {
+            if (match_count < 500) {
+                matches[match_count].line = i;
+                matches[match_count].col = (int)(ptr - buffer[i]);
+                match_count++;
             }
-            return; // Found a match, exit early
+            ptr++; // Move forward 1 char to catch overlapping matches if any
         }
     }
 
-    // If it falls through the loop, no matches were found
-    mvprintw(LINES - 1, 0, "Pattern not found! Press any key...");
-    clrtoeol();
-    refresh();
-    getch();
+    if (match_count == 0) {
+        snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str);
+        return;
+    }
+
+    // 2. Interactive Navigation Loop
+    while (1) {
+        // Snap view to the currently selected match index
+        current_line = matches[current_match_idx].line;
+        cursor_x = matches[current_match_idx].col;
+
+        // Keep viewport camera pinned to center on match if possible
+        int max_displayable_lines = LINES - 4;
+        scroll_y = current_line - (max_displayable_lines / 2);
+        if (scroll_y < 0) scroll_y = 0;
+        if (scroll_y > line_count - max_displayable_lines) {
+            scroll_y = line_count - max_displayable_lines;
+        }
+        if (scroll_y < 0) scroll_y = 0;
+
+        // Force a UI repaint to highlight the match position immediately
+        void draw_screen(); 
+        snprintf(status_msg, sizeof(status_msg), 
+                 "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]", 
+                 current_match_idx + 1, match_count);
+        draw_screen(); 
+
+        int ch = getch();
+        if (ch == 10 || ch == 13) { // Enter confirms selection
+            snprintf(status_msg, sizeof(status_msg), "Found match at line %d.", current_line + 1);
+            break; 
+        } 
+        else if (ch == 27) { // Escape clears status and drops out
+            status_msg[0] = '\0';
+            break; 
+        } 
+        else if (ch == KEY_RIGHT || ch == KEY_DOWN) {
+            // Cycle forward
+            current_match_idx = (current_match_idx + 1) % match_count;
+        } 
+        else if (ch == KEY_LEFT || ch == KEY_UP) {
+            // Cycle backward
+            current_match_idx = (current_match_idx - 1 + match_count) % match_count;
+        }
+    }
 }
 
 void goto_line() {
@@ -501,10 +541,74 @@ int main(int argc, char *argv[]) {
                 int len = strlen(buffer[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
-	} else if (ch == KEY_LEFT) {
+        } else if (ch == KEY_LEFT) {
             if (cursor_x > 0) cursor_x--;
         } else if (ch == KEY_RIGHT) {
             if (cursor_x < (int)strlen(buffer[current_line])) cursor_x++;
+
+        } else if (ch == KEY_PPAGE) {
+            // --- PAGE UP ---
+            int max_displayable_lines = LINES - 4;
+            
+            // Move cursor up by a full page
+            current_line -= max_displayable_lines;
+            if (current_line < 0) current_line = 0;
+            
+            // Move the viewport camera up by the same distance
+            scroll_y -= max_displayable_lines;
+            if (scroll_y < 0) scroll_y = 0;
+            
+            // Adjust cursor column safety on the new line
+            int len = strlen(buffer[current_line]);
+            if (cursor_x > len) cursor_x = len;
+
+        } else if (ch == KEY_NPAGE) {
+            // --- PAGE DOWN ---
+            int max_displayable_lines = LINES - 4;
+            
+            // Move cursor down by a full page
+            current_line += max_displayable_lines;
+            if (current_line >= line_count) current_line = line_count - 1;
+            
+            // Move the viewport camera down, keeping it in bounds
+            scroll_y += max_displayable_lines;
+            if (scroll_y > line_count - max_displayable_lines) {
+                scroll_y = line_count - max_displayable_lines;
+            }
+            if (scroll_y < 0) scroll_y = 0;
+            
+            // Adjust cursor column safety on the new line
+            int len = strlen(buffer[current_line]);
+            if (cursor_x > len) cursor_x = len;
+
+        } else if (ch == KEY_HOME || ch == 1 || ch == 27) { 
+            // Handle Home, Ctrl+A (\001), or manual escape parsing
+            if (ch == KEY_HOME || ch == 1) {
+                cursor_x = 0;
+            } else { // It's an Escape byte (27)
+                int next1 = getch();
+                int next2 = getch();
+                // Check if it's the sequence for Home: \033[1~ or \033[H
+                if (next1 == '[' && (next2 == '1' || next2 == 'H')) {
+                    if (next2 == '1') getch(); // Swallow the trailing '~'
+                    cursor_x = 0;
+                } 
+                // Check if it's the sequence for End: \033[4~ or \033[F
+                else if (next1 == '[' && (next2 == '4' || next2 == 'F')) {
+                    if (next2 == '4') getch(); // Swallow the trailing '~'
+                    cursor_x = (int)strlen(buffer[current_line]);
+                } else {
+                    // It's just a regular standalone Escape key press or an unhandled sequence
+                    // Unget the characters if you want to preserve them, or do nothing.
+                    ungetch(next2);
+                    ungetch(next1);
+                }
+            }
+            
+        } else if (ch == KEY_END || ch == 5) {
+            // Handle End or Ctrl+E (\005)
+            cursor_x = (int)strlen(buffer[current_line]);         
+
         } else if (ch == 9) {
             // Intercept Tab and insert 4 regular spaces
             int tab_size = 4;
