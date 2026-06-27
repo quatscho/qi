@@ -248,7 +248,7 @@ void draw_screen() {
         attroff(COLOR_PAIR(1));
     } else {
         // Compact menu bar to prevent line wrapping completely
-        mvprintw(LINES - 1, 0, "^O Open | ^W Save | ^F Find | ^G GoTo | ^D DelLines | ^U Undo | ^Q Quit");
+        mvprintw(LINES - 1, 0, "^O Open | ^W Save | ^F Find | ^R Repl | ^G GoTo | ^D DelLines | ^U Undo | ^Q Quit");
     }
     
     // Adjust physical cursor position to match the shifted text view (+2 offset)
@@ -335,6 +335,122 @@ void find_text() {
             current_match_idx = (current_match_idx - 1 + match_count) % match_count;
         }
     }
+}
+
+void replace_text() {
+    char search_str[128] = "";
+    char replace_str[128] = "";
+    echo();
+    noraw();
+
+    // 1. Get Search Term
+    mvprintw(LINES - 1, 0, "Find text to replace: ");
+    clrtoeol();
+    refresh();
+    getstr(search_str);
+    if (strlen(search_str) == 0) { noecho(); raw(); return; }
+
+    // 2. Get Replacement Term
+    mvprintw(LINES - 1, 0, "Replace with: ");
+    clrtoeol();
+    refresh();
+    getstr(replace_str);
+
+    noecho();
+    raw();
+
+    // 3. Collect Match Coordinates
+    struct { int line; int col; } matches[500];
+    int match_count = 0;
+    
+    for (int i = 0; i < line_count; i++) {
+        char *ptr = buffer[i];
+        while ((ptr = strstr(ptr, search_str)) != NULL) {
+            if (match_count < 500) {
+                matches[match_count].line = i;
+                matches[match_count].col = (int)(ptr - buffer[i]);
+                match_count++;
+            }
+            ptr += strlen(search_str); // Advance past this match
+        }
+    }
+
+    if (match_count == 0) {
+        snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str);
+        return;
+    }
+
+    // Save a single checkpoint so the entire batch or any single choice can be undone!
+    save_undo_state();
+
+    int current_idx = 0;
+    int replaced_count = 0;
+    int force_all = 0; // Flags if user pressed 'all'
+
+    // 4. Interactive Replace Loop
+    while (current_idx < match_count) {
+        int line = matches[current_idx].line;
+        int col = matches[current_idx].col;
+
+        // Snap view to match
+        current_line = line;
+        cursor_x = col;
+        int max_displayable_lines = LINES - 4;
+        scroll_y = current_line - (max_displayable_lines / 2);
+        if (scroll_y < 0) scroll_y = 0;
+
+        void draw_screen();
+        
+        int choice = 'n';
+        if (!force_all) {
+            snprintf(status_msg, sizeof(status_msg), 
+                     "Match %d of %d: Replace? (y: Yes | n: No | a: All | q: Quit)", 
+                     current_idx + 1, match_count);
+            draw_screen();
+            choice = getch();
+        } else {
+            choice = 'y';
+        }
+
+        if (choice == 'q' || choice == 27) {
+            break;
+        }
+        else if (choice == 'a') {
+            force_all = 1;
+            choice = 'y';
+        }
+
+        if (choice == 'y') {
+            char temp[MAX_LINE_LEN] = "";
+            int search_len = strlen(search_str);
+            int replace_len = strlen(replace_str);
+
+            // Safety limit check
+            if (strlen(buffer[line]) - search_len + replace_len < MAX_LINE_LEN) {
+                // Construct modified line string safely
+                strncpy(temp, buffer[line], col);
+                temp[col] = '\0';
+                strcat(temp, replace_str);
+                strcat(temp, &buffer[line][col + search_len]);
+                strcpy(buffer[line], temp);
+
+                replaced_count++;
+
+                // Offset subsequent matches on this EXACT line because string shifted sizes
+                int delta = replace_len - search_len;
+                for (int j = current_idx + 1; j < match_count; j++) {
+                    if (matches[j].line == line) {
+                        matches[j].col += delta;
+                    } else {
+                        break; // Matches are gathered in order, safely break to next line
+                    }
+                }
+            }
+        }
+        current_idx++;
+    }
+
+    snprintf(status_msg, sizeof(status_msg), "Replaced %d occurrence(s).", replaced_count);
 }
 
 void goto_line() {
@@ -511,6 +627,7 @@ int main(int argc, char *argv[]) {
         else if (ch == CTRL_KEY('o')) interactive_open();
         else if (ch == CTRL_KEY('w')) save_file();
         else if (ch == CTRL_KEY('f')) find_text();
+        else if (ch == CTRL_KEY('r')) replace_text();
         else if (ch == CTRL_KEY('g')) goto_line();
         else if (ch == CTRL_KEY('u')) undo();
         else if (ch == CTRL_KEY('d')) delete_lines_interactive();
