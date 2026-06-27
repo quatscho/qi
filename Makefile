@@ -9,15 +9,15 @@ INSTALL_DIR = $(HOME)/bin
 all: $(TARGET)
 
 $(TARGET): qi.c
-    $(CC) $(CFLAGS) qi.c -o $(TARGET) $(LIBS)
+	$(CC) $(CFLAGS) qi.c -o $(TARGET) $(LIBS)
 
 # Install target to move the binary to ~/bin
 install: $(TARGET)
-    mkdir -p $(INSTALL_DIR)
-    cp $(TARGET) $(INSTALL_DIR)/$(TARGET)
+	mkdir -p $(INSTALL_DIR)
+	cp $(TARGET) $(INSTALL_DIR)/$(TARGET)
 
 # Clean up build files in the local directory
 clean:
-    rm -f $(TARGET)
+	rm -f $(TARGET)
 
 .PHONY: all install clean
