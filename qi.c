@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.8 (2026)
+ * Version: 1.0.9 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.8"
+#define VERSION "1.0.9"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -921,23 +921,36 @@ int main(int argc, char *argv[]) {
             cursor_x = (int)strlen(buffer[current_line]);         
 
         } else if (ch == 9) {
-            // Intercept Tab and insert 4 regular spaces
-            int tab_size = 4;
+            // Intercept Tab (ASCII 9)
             int len = strlen(buffer[current_line]);
             
-            // Safety check: make sure adding 4 spaces won't overflow the maximum line limit
+            // Check if we are working on a Makefile to determine tab style
+            int is_makefile = (strstr(current_filename, "Makefile") != NULL);
+            int tab_size = is_makefile ? 1 : 4;
+            
             if (len + tab_size < MAX_LINE_LEN) {
                 save_undo_state();
-                // Shift everything to the right by 4 spaces
-                memmove(&buffer[current_line][cursor_x + tab_size], &buffer[current_line][cursor_x], len - cursor_x + 1);
                 
-                // Fill the new empty slot with 4 space characters
-                for (int i = 0; i < tab_size; i++) {
-                    buffer[current_line][cursor_x + i] = ' ';
+                // Shift text to the right to make room
+                memmove(&buffer[current_line][cursor_x + tab_size], 
+                        &buffer[current_line][cursor_x], 
+                        len - cursor_x + 1);
+                
+                if (is_makefile) {
+                    // Insert a true hardware tab character
+                    buffer[current_line][cursor_x] = '\t';
+                    tracker_set_modified(current_line, cursor_x, 1);
+                } else {
+                    // Fill the slot with 4 space characters
+                    for (int i = 0; i < tab_size; i++) {
+                        buffer[current_line][cursor_x + i] = ' ';
+                        tracker_set_modified(current_line, cursor_x + i, 1);
+                    }
                 }
                 
-                cursor_x += tab_size; // Advance the cursor forward 4 spaces
+                cursor_x += tab_size; // Advance the cursor forward
             }
+
         } else if (ch == 10 || ch == 13) {
             // Handle Enter Key
             if (line_count < MAX_LINES) {
