@@ -10,6 +10,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
+#define VERSION "1.0.6"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -343,7 +344,8 @@ void draw_screen() {
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
         attroff(COLOR_PAIR(1));
     } else {
-        mvprintw(LINES - 1, 0, "^O Open | ^W Save | ^F Find | ^R Repl | ^G GoTo | ^D DelLines | ^U Undo | ^Q Quit");
+        mvprintw(LINES - 1, 0, "qi text editor, v.%s (c) 2026, Christopher Camacho (^? for Help)", VERSION);
+        //mvprintw(LINES - 1, 0, "^O Open | ^W Save | ^F Find | ^R Repl | ^G GoTo | ^D DelLines | ^U Undo | ^Q Quit");
     }
     
     // Adjust physical cursor position (+2 vertical, +6 horizontal offset alignment)
@@ -684,6 +686,54 @@ void delete_lines_interactive() {
     snprintf(status_msg, sizeof(status_msg), "Deleted %d line(s).", deleted_count); //[span_14](start_span)[span_14](end_span)
 }
 
+void show_help_window() {
+    // 1. Calculate dimensions and centering
+    int height = 14;
+    int width = 50;
+    int start_y = (LINES - height) / 2;
+    int start_x = (COLS - width) / 2;
+
+    // 2. Create the window
+    WINDOW *help_win = newwin(height, width, start_y, start_x);
+    
+    // Allow the window to catch all keypad inputs seamlessly
+    keypad(help_win, TRUE);
+
+    // 3. Draw the thin ANSI/NCURSES box borders
+    // Arguments: win, vline, hline
+    box(help_win, 0, 0); 
+
+    // 4. Render the command list content
+    const char *header = "--- qi text editor help ---";
+    int string_length = 27;
+    int header_x = (width - string_length) / 2;
+
+    mvwprintw(help_win, 1, header_x, "%s", header);
+    mvwprintw(help_win, 3, 4, "^O  Open File");
+    mvwprintw(help_win, 4, 4, "^W  Save File");
+    mvwprintw(help_win, 5, 4, "^F  Find Text");
+    mvwprintw(help_win, 6, 4, "^R  Replace Text");
+    mvwprintw(help_win, 7, 4, "^G  Go To Line");
+    mvwprintw(help_win, 8, 4, "^D  Delete Line");
+    mvwprintw(help_win, 9, 4, "^U  Undo Action");
+    mvwprintw(help_win, 10, 4, "^Q  Quit Editor");
+    
+    mvwprintw(help_win, 12, (width - 24) / 2, "Press any key to close");
+
+    // 5. Refresh to show the popup overlay
+    wrefresh(help_win);
+
+    // 6. Wait for a keypress to dismiss
+    wgetch(help_win);
+
+    // 7. Clean up memory and remove the window
+    delwin(help_win);
+
+    // 8. Force standard screen to redraw over the cleared popup area
+    touchwin(stdscr);
+    refresh();
+}
+
 int main(int argc, char *argv[]) {
 
     // 1. First, configure low-level TTY flow control
@@ -741,6 +791,7 @@ int main(int argc, char *argv[]) {
         else if (ch == CTRL_KEY('o')) interactive_open();
         else if (ch == CTRL_KEY('w')) save_file();
         else if (ch == CTRL_KEY('f')) find_text();
+        else if (ch == CTRL_KEY('?')) show_help_window();
         else if (ch == CTRL_KEY('r')) replace_text();
         else if (ch == CTRL_KEY('g')) goto_line();
         else if (ch == CTRL_KEY('u')) undo();
