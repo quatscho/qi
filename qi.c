@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.11 (2026)
+ * Version: 1.0.12 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.11"
+#define VERSION "1.0.12"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -253,26 +253,26 @@ void draw_screen() {
     }
 
     int max_displayable_lines = LINES - 4; 
+    int physical_row = 2; // Start rendering text at physical row 2
 
     // Render the file content lines
     for (int i = 0; i < max_displayable_lines; i++) {
         int file_line_index = scroll_y + i;
         
         if (file_line_index >= line_count) break;
+        if (physical_row >= LINES - 2) break; // Don't overwrite the bottom border!
 
-        int screen_row = i + 2;
-
-        // Draw the line number
+        // Draw the line number at the start of this buffer line's physical space
         if (file_line_index == current_line) {
             attron(COLOR_PAIR(1));
-            mvprintw(screen_row, 0, "%3d ", file_line_index + 1); 
+            mvprintw(physical_row, 0, "%3d ", file_line_index + 1); 
             attroff(COLOR_PAIR(1));
         } else {
-            mvprintw(screen_row, 0, "%3d ", file_line_index + 1);
+            mvprintw(physical_row, 0, "%3d ", file_line_index + 1);
         }
 
         // Draw the vertical separator
-        mvaddch(screen_row, 4, ACS_VLINE);
+        mvaddch(physical_row, 4, ACS_VLINE);
 
         // --- UPGRADED SYNTAX HIGHLIGHT SCANNER ---
         char *line = buffer[file_line_index];
@@ -280,15 +280,33 @@ void draw_screen() {
         int in_string = 0;
         int in_char = 0;
 
-        move(screen_row, 6);
+        // Track where we are drawing *within* the editor line text area
+        int available_width = COLS - 6; 
+        int current_phys_row = physical_row;
+        int current_phys_col = 6;
+
+        move(current_phys_row, current_phys_col);
 
         int leading_space = 0;
         while (leading_space < len && (line[leading_space] == ' ' || line[leading_space] == '\t')) {
             printw("%c", line[leading_space]);
+            current_phys_col++;
+            if (current_phys_col >= COLS) {
+                current_phys_row++;
+                current_phys_col = 6;
+                move(current_phys_row, current_phys_col);
+            }
             leading_space++;
         }
 
         for (int j = leading_space; j < len; j++) {
+            // Check if we need to wrap the screen row manually for printing
+            if (current_phys_col >= COLS) {
+                current_phys_row++;
+                current_phys_col = 6;
+                move(current_phys_row, current_phys_col);
+            }
+
             if (j == leading_space && line[j] == '#') {
                 attron(COLOR_PAIR(3));
                 printw("%s", &line[j]);
@@ -313,10 +331,12 @@ void draw_screen() {
                     printw("%c", line[j]);
                     in_char = 1;
                 }
+                current_phys_col++;
                 continue;
             }
             if (in_char) {
                 printw("%c", line[j]);
+                current_phys_col++;
                 continue;
             }
 
@@ -330,10 +350,12 @@ void draw_screen() {
                     printw("%c", line[j]);
                     in_string = 1;
                 }
+                current_phys_col++;
                 continue;
             }
             if (in_string) {
                 printw("%c", line[j]);
+                current_phys_col++;
                 continue;
             }
 
@@ -352,7 +374,16 @@ void draw_screen() {
                         char next = line[j + kw_len];
                         if (!isalnum((unsigned char)next) && next != '_') {
                             attron(COLOR_PAIR(3));
-                            printw("%s", keywords[k]);
+                            // Printing a keyword word safely character-by-character to monitor screen margins
+                            for (int m = 0; m < kw_len; m++) {
+                                if (current_phys_col >= COLS) {
+                                    current_phys_row++;
+                                    current_phys_col = 6;
+                                    move(current_phys_row, current_phys_col);
+                                }
+                                printw("%c", keywords[k][m]);
+                                current_phys_col++;
+                            }
                             attroff(COLOR_PAIR(3));
                             j += (kw_len - 1); 
                             matched = 1;
@@ -368,17 +399,22 @@ void draw_screen() {
                 printw("%c", line[j]);
                 attroff(COLOR_PAIR(4));
             } else {
-                // UNIQUE UNSAVED TEXT COLOR LOGIC
                 if (tracker_is_modified(file_line_index, j)) {
                     attron(COLOR_PAIR(1));
                     printw("%c", line[j]);
                     attroff(COLOR_PAIR(1));
                 } else { 
                     printw("%c", line[j]);
+                }
             }
+            current_phys_col++;
         }
+
+        // Advance physical row allocation by how many vertical tracks this buffer line consumed
+        int lines_consumed = 1 + (len / available_width);
+        physical_row += lines_consumed;
     }
-}
+
     // 3. Draw the bottom horizontal separator line (LINES - 2)
     move(LINES - 2, 0);
     clrtoeol();
@@ -426,11 +462,28 @@ void draw_screen() {
         }
     }
     
-    // Adjust physical cursor position (+2 vertical, +6 horizontal offset alignment)
-    move((current_line - scroll_y) + 2, cursor_x + 6); 
+    // --- INTEGRATED PHYSICAL CURSOR MATH FOR WRAPPING ---
+    int cursor_physical_row = 2;
+    int available_width = COLS - 6;
+
+    for (int i = scroll_y; i < current_line; i++) {
+        int l_len = strlen(buffer[i]);
+        int l_rows = (l_len / available_width) + 1;
+        if (l_len == 0) l_rows = 1;
+        cursor_physical_row += l_rows;
+    }
+
+    cursor_physical_row += (cursor_x / available_width);
+    int cursor_physical_col = 6 + (cursor_x % available_width);
+
+    if (cursor_physical_row < LINES - 2) {
+        move(cursor_physical_row, cursor_physical_col);
+    } else {
+        move(LINES - 3, COLS - 1); // Clamp gracefully if out of visual view bounds
+    }
 
     refresh();
-}
+} // END draw_screen
 
 void find_text() {
     char search_str[128];
