@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.16 (2026)
+ * Version: 1.0.17 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.16"
+#define VERSION "1.0.17"
 
 typedef struct {
     char **buffer;
@@ -171,11 +171,13 @@ void interactive_open() {
     char filename[256];
     int idx = 0;
     filename[0] = '\0';
+    const char *prompt = "Enter filename to open (ESC to cancel): ";
+    int prompt_len = strlen(prompt);
 
-    // Keep raw() active so we can catch individual keys like ESC instantly!
-    echo();
+    // Turn off automatic echo so our loop has 100% manual control over rendering
+    noecho();
 
-    mvprintw(LINES - 1, 0, "Enter filename to open (ESC to cancel): ");
+    mvprintw(LINES - 1, 0, "%s", prompt);
     clrtoeol(); 
     refresh();  
 
@@ -183,7 +185,6 @@ void interactive_open() {
         int ch = getch();
 
         if (ch == 27) { // ESC key caught instantly
-            noecho();
             status_msg[0] = '\0';
             return;
         }
@@ -194,31 +195,31 @@ void interactive_open() {
             if (idx > 0) {
                 idx--;
                 filename[idx] = '\0';
-                // Move back, wipe character visually, and step back again
-                mvprintw(LINES - 1, 40 + idx, " ");
-                move(LINES - 1, 40 + idx);
+                // Move back, wipe character visually, and step back again safely
+                mvprintw(LINES - 1, prompt_len + idx, " ");
+                move(LINES - 1, prompt_len + idx);
                 refresh();
             }
         }
         else if (ch >= 32 && ch <= 126) { // Visible characters
             filename[idx++] = (char)ch;
             filename[idx] = '\0';
+            // Manually echo the character now that automatic echo is disabled
+            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch);
+            refresh();
         }
     }
-
-    noecho(); 
 
     // Only load if the user actually typed a name
     if (strlen(filename) > 0) {
         FILE *fp = fopen(filename, "r");
         if (fp) {
             fclose(fp);
-            load_file(filename); // Pass it to our silent loader[span_4](start_span)[span_4](end_span)
+            load_file(filename); // Pass it to our silent loader
         } else {
             mvprintw(LINES - 1, 0, "File not found! Press any key...");
             clrtoeol();
             refresh();
-            raw(); // Ensure raw state is safe before blocking
             getch();
         }
     }
@@ -541,7 +542,8 @@ void find_text() {
     const char *prompt = "Find: ";
     int prompt_len = strlen(prompt);
 
-    echo();
+    // Force noecho() so backspace operations wipe clean manually
+    noecho();
     mvprintw(LINES - 1, 0, "%s", prompt);
     clrtoeol();
     refresh();
@@ -549,14 +551,13 @@ void find_text() {
     while (idx < (int)sizeof(search_str) - 1) {
         int ch = getch();
         if (ch == 27) { // ESC
-            noecho();
             status_msg[0] = '\0';
             return;
         }
         else if (ch == 10 || ch == 13) { // Enter
             break;
         }
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) { // Backspace
             if (idx > 0) {
                 idx--;
                 search_str[idx] = '\0';
@@ -565,12 +566,13 @@ void find_text() {
                 refresh();
             }
         }
-        else if (ch >= 32 && ch <= 126) {
+        else if (ch >= 32 && ch <= 126) { // Visible characters
             search_str[idx++] = (char)ch;
             search_str[idx] = '\0';
+            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch);
+            refresh();
         }
     }
-    noecho();
 
     if (strlen(search_str) == 0) return;
 
@@ -579,7 +581,7 @@ void find_text() {
     int match_count = 0;
     int current_match_idx = 0;
 
-    // 1. Scan entire file buffer for occurrences
+    // Scan entire file buffer for occurrences
     for (int i = 0; i < line_count; i++) {
         char *ptr = buffer[i];
         while ((ptr = strstr(ptr, search_str)) != NULL) {
@@ -588,7 +590,7 @@ void find_text() {
                 matches[match_count].col = (int)(ptr - buffer[i]);
                 match_count++;
             }
-            ptr++; // Move forward 1 char to catch overlapping matches if any
+            ptr++; // Move forward 1 char to catch overlapping matches
         }
     }
 
@@ -597,13 +599,11 @@ void find_text() {
         return;
     }
 
-    // 2. Interactive Navigation Loop
+    // Interactive Navigation Loop
     while (1) {
-        // Snap view to the currently selected match index
         current_line = matches[current_match_idx].line;
         cursor_x = matches[current_match_idx].col;
 
-        // Keep viewport camera pinned to center on match if possible
         int max_displayable_lines = LINES - 4;
         scroll_y = current_line - (max_displayable_lines / 2);
         if (scroll_y < 0) scroll_y = 0;
@@ -612,7 +612,6 @@ void find_text() {
         }
         if (scroll_y < 0) scroll_y = 0;
 
-        // Force a UI repaint to highlight the match position immediately
         draw_screen(); 
         snprintf(status_msg, sizeof(status_msg), 
                  "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]", 
@@ -620,20 +619,18 @@ void find_text() {
         draw_screen(); 
 
         int ch = getch();
-        if (ch == 10 || ch == 13) { // Enter confirms selection
+        if (ch == 10 || ch == 13) { 
             snprintf(status_msg, sizeof(status_msg), "Found match at line %d.", current_line + 1);
             break; 
         } 
-        else if (ch == 27) { // Escape clears status and drops out
+        else if (ch == 27) { 
             status_msg[0] = '\0';
             break; 
         } 
         else if (ch == KEY_RIGHT || ch == KEY_DOWN) {
-            // Cycle forward
             current_match_idx = (current_match_idx + 1) % match_count;
         } 
         else if (ch == KEY_LEFT || ch == KEY_UP) {
-            // Cycle backward
             current_match_idx = (current_match_idx - 1 + match_count) % match_count;
         }
     }
@@ -646,7 +643,7 @@ void replace_text() {
     search_str[0] = '\0';
     replace_str[0] = '\0';
     
-    echo();
+    noecho();
 
     // Prompt 1: Find text
     const char *prompt1 = "Find text to replace: ";
@@ -657,7 +654,7 @@ void replace_text() {
 
     while (idx < (int)sizeof(search_str) - 1) {
         int ch = getch();
-        if (ch == 27) { noecho(); status_msg[0] = '\0'; return; }
+        if (ch == 27) { status_msg[0] = '\0'; return; }
         else if (ch == 10 || ch == 13) break;
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (idx > 0) {
@@ -668,9 +665,10 @@ void replace_text() {
         }
         else if (ch >= 32 && ch <= 126) {
             search_str[idx++] = (char)ch; search_str[idx] = '\0';
+            mvprintw(LINES - 1, p1_len + idx - 1, "%c", ch); refresh();
         }
     }
-    if (strlen(search_str) == 0) { noecho(); return; }
+    if (strlen(search_str) == 0) return;
 
     // Prompt 2: Replace with
     idx = 0;
@@ -682,7 +680,7 @@ void replace_text() {
 
     while (idx < (int)sizeof(replace_str) - 1) {
         int ch = getch();
-        if (ch == 27) { noecho(); status_msg[0] = '\0'; return; }
+        if (ch == 27) { status_msg[0] = '\0'; return; }
         else if (ch == 10 || ch == 13) break;
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (idx > 0) {
@@ -693,9 +691,9 @@ void replace_text() {
         }
         else if (ch >= 32 && ch <= 126) {
             replace_str[idx++] = (char)ch; replace_str[idx] = '\0';
+            mvprintw(LINES - 1, p2_len + idx - 1, "%c", ch); refresh();
         }
     }
-    noecho();
 
     // 3. Collect Match Coordinates
     struct { int line; int col; } matches[500];
@@ -718,12 +716,11 @@ void replace_text() {
         return;
     }
 
-    // Save a single checkpoint so the entire batch or any single choice can be undone!
     save_undo_state();
 
     int current_idx = 0;
     int replaced_count = 0;
-    int force_all = 0; // Flags if user pressed 'all'
+    int force_all = 0; 
 
     // 4. Interactive Replace Loop
     while (current_idx < match_count) {
@@ -737,8 +734,6 @@ void replace_text() {
         scroll_y = current_line - (max_displayable_lines / 2);
         if (scroll_y < 0) scroll_y = 0;
 
-        void draw_screen();
-        
         int choice = 'n';
         if (!force_all) {
             snprintf(status_msg, sizeof(status_msg), 
@@ -763,9 +758,7 @@ void replace_text() {
             int search_len = strlen(search_str);
             int replace_len = strlen(replace_str);
 
-            // Safety limit check
             if (strlen(buffer[line]) - search_len + replace_len < MAX_LINE_LEN) {
-                // Construct modified line string safely
                 strncpy(temp, buffer[line], col);
                 temp[col] = '\0';
                 strcat(temp, replace_str);
@@ -774,13 +767,12 @@ void replace_text() {
 
                 replaced_count++;
 
-                // Offset subsequent matches on this EXACT line because string shifted sizes
                 int delta = replace_len - search_len;
                 for (int j = current_idx + 1; j < match_count; j++) {
                     if (matches[j].line == line) {
                         matches[j].col += delta;
                     } else {
-                        break; // Matches are gathered in order, safely break to next line
+                        break; 
                     }
                 }
             }
