@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.13 (2026)
+ * Version: 1.0.14 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.13"
+#define VERSION "1.0.14"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -564,7 +564,7 @@ void find_text() {
         if (scroll_y < 0) scroll_y = 0;
 
         // Force a UI repaint to highlight the match position immediately
-        void draw_screen(); 
+        draw_screen(); 
         snprintf(status_msg, sizeof(status_msg), 
                  "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]", 
                  current_match_idx + 1, match_count);
@@ -1082,7 +1082,21 @@ int main(int argc, char *argv[]) {
             if (cursor_x > 0) cursor_x--;
         } else if (ch == KEY_RIGHT) {
             if (cursor_x < (int)strlen(buffer[current_line])) cursor_x++;
-
+        } else if (ch == 393 || ch == 545 || ch == 260 || ch == 543) { 
+            // --- BACKUP / macOS WORD HOP LEFT (Option + Left Arrow) ---
+            if (cursor_x > 0) {
+                while (cursor_x > 0 && isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
+                while (cursor_x > 0 && !isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
+            }
+            continue;
+        } else if (ch == 402 || ch == 560 || ch == 261 || ch == 544) { 
+            // --- BACKUP / macOS WORD HOP RIGHT (Option + Right Arrow) ---
+            int len = strlen(buffer[current_line]);
+            if (cursor_x < len) {
+                while (cursor_x < len && !isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
+                while (cursor_x < len && isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
+            }
+            continue;
         } else if (ch == KEY_PPAGE) {
             // --- PAGE UP ---
             int max_displayable_lines = LINES - 4;
@@ -1118,12 +1132,33 @@ int main(int argc, char *argv[]) {
             int len = strlen(buffer[current_line]);
             if (cursor_x > len) cursor_x = len;
 
-        } else if (ch == KEY_HOME || ch == 1 || ch == 27) { 
+        } else if (ch == KEY_HOME || ch == 1 || ch == 27) {
             // Handle Home, Ctrl+A (\001), or manual escape parsing
             if (ch == KEY_HOME || ch == 1) {
                 cursor_x = 0;
             } else { // It's an Escape byte (27)
                 int next1 = getch();
+                
+                // --- macOS OPTION + ARROW SHORTCUTS ---
+                if (next1 == 'b') { 
+                    // Option + Left Arrow (Hop Word Left)
+                    if (cursor_x > 0) {
+                        while (cursor_x > 0 && isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
+                        while (cursor_x > 0 && !isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
+                    }
+                    continue;
+                } 
+                else if (next1 == 'f') { 
+                    // Option + Right Arrow (Hop Word Right)
+                    int len = strlen(buffer[current_line]);
+                    if (cursor_x < len) {
+                        while (cursor_x < len && !isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
+                        while (cursor_x < len && isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
+                    }
+                    continue;
+                }
+                
+                // --- EXISTING EXTENDED KEY ESCAPES ---
                 int next2 = getch();
                 // Check if it's the sequence for Home: \033[1~ or \033[H
                 if (next1 == '[' && (next2 == '1' || next2 == 'H')) {
@@ -1135,8 +1170,6 @@ int main(int argc, char *argv[]) {
                     if (next2 == '4') getch(); // Swallow the trailing '~'
                     cursor_x = (int)strlen(buffer[current_line]);
                 } else {
-                    // It's just a regular standalone Escape key press or an unhandled sequence
-                    // Unget the characters if you want to preserve them, or do nothing.
                     ungetch(next2);
                     ungetch(next1);
                 }
