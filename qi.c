@@ -1,3 +1,13 @@
+/*
+ * qi - A Lightweight Terminal Text Editor
+ * Author: Christopher Camacho
+ * Version: 1.0.7 (2026)
+ *
+ * A minimalist, ncurses-based text editor featuring dynamic line counting,
+ * interactive search and replace, multi-line deletion tools, visual state 
+ * change tracking, and basic C syntax highlighting.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -6,7 +16,7 @@
 #include <termios.h> 
 #include <unistd.h> 
 
-#define MAX_LINES 1024
+#define MAX_LINES 50000
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
