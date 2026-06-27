@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.12 (2026)
+ * Version: 1.0.13 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.12"
+#define VERSION "1.0.13"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -66,7 +66,7 @@ void save_undo_state() {
     undo_stack[undo_stack_top].is_modified = is_modified;
 
     is_modified = 1;
-}
+} // End save_undo_state
 
 void undo() {
     if (undo_stack_top < 0) {
@@ -84,7 +84,7 @@ void undo() {
 
     undo_stack_top--; // Pop it off
     snprintf(status_msg, sizeof(status_msg), "Undo!");
-}
+} // End undo
 
 // Function to handle the "Open" command
 // 1. Silent file loader used by both main() and the menu
@@ -115,7 +115,7 @@ void load_file(const char *filename) {
         buffer[0][0] = '\0';
         is_modified = 0;
     }
-}
+} // End load_file
 
 // 2. Interactive menu command when you press Ctrl+O
 void interactive_open() {
@@ -173,7 +173,7 @@ void interactive_open() {
             getch();
         }
     }
-}
+} // End interactive_open
 
 // Function to handle the "Save" command
 void save_file() {
@@ -218,7 +218,7 @@ void save_file() {
         refresh();
         getch(); // Keep this one blocking because it's a critical error
     }
-}
+} // End save_file
 
 void draw_screen() {
     clear();
@@ -588,7 +588,7 @@ void find_text() {
             current_match_idx = (current_match_idx - 1 + match_count) % match_count;
         }
     }
-}
+} // End find_text
 
 void replace_text() {
     char search_str[128];
@@ -744,7 +744,7 @@ void replace_text() {
     } else {
         snprintf(status_msg, sizeof(status_msg), "No replacements made.");
     }
-}
+} // End replace_text
 
 void goto_line() {
     char line_input[32];
@@ -807,7 +807,7 @@ void goto_line() {
         scroll_y = line_count - max_displayable_lines;
         if (scroll_y < 0) scroll_y = 0;
     }
-}
+} // End goto_line
 
 void delete_lines_interactive() {
     char input[256];
@@ -921,11 +921,11 @@ void delete_lines_interactive() {
     } else {
         snprintf(status_msg, sizeof(status_msg), "No lines deleted.");
     }
-}
+} // End delete_lines_interactive
 
 void show_help_window() {
     // 1. Calculate dimensions and centering
-    int height = 14;
+    int height = 16;
     int width = 50;
     int start_y = (LINES - height) / 2;
     int start_x = (COLS - width) / 2;
@@ -953,9 +953,11 @@ void show_help_window() {
     mvwprintw(help_win, 7, 4, "^G  Go To Line");
     mvwprintw(help_win, 8, 4, "^D  Delete Line(s)");
     mvwprintw(help_win, 9, 4, "^U  Undo Action");
-    mvwprintw(help_win, 10, 4, "^Q  Quit Editor");
+    mvwprintw(help_win, 10, 4, "^T Jump to Start of File");
+    mvwprintw(help_win, 11, 4, "^B Jump to End of File");
+    mvwprintw(help_win, 12, 4, "^Q  Quit Editor");
     
-    mvwprintw(help_win, 12, (width - 24) / 2, "Press any key to close");
+    mvwprintw(help_win, 14, (width - 24) / 2, "Press any key to close");
 
     // 5. Refresh to show the popup overlay
     wrefresh(help_win);
@@ -969,7 +971,7 @@ void show_help_window() {
     // 8. Force standard screen to redraw over the cleared popup area
     touchwin(stdscr);
     refresh();
-}
+} // End show_help_window
 
 int main(int argc, char *argv[]) {
 
@@ -1037,6 +1039,18 @@ int main(int argc, char *argv[]) {
         else if (ch == CTRL_KEY('g')) goto_line();
         else if (ch == CTRL_KEY('u')) undo();
         else if (ch == CTRL_KEY('d')) delete_lines_interactive();
+        else if (ch == CTRL_KEY('t')) { // Top of file
+            current_line = 0;
+            cursor_x = 0;
+            scroll_y = 0;
+        }
+        else if (ch == CTRL_KEY('b')) { // Bottom of file
+            current_line = line_count - 1;
+            cursor_x = 0;
+            int max_displayable_lines = LINES - 4;
+            scroll_y = current_line - max_displayable_lines + 1;
+            if (scroll_y < 0) scroll_y = 0;
+        }
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
