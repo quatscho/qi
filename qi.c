@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.14 (2026)
+ * Version: 1.0.15 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,10 +21,10 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.14"
+#define VERSION "1.0.15"
 
 typedef struct {
-    char buffer[MAX_LINES][MAX_LINE_LEN];
+    char **buffer;
     int line_count;
     int current_line;
     int cursor_x;
@@ -47,8 +47,14 @@ int is_modified = 0;
 int line_modified[MAX_LINES] = {0};
 
 void save_undo_state() {
-    // If the stack is full, shift everything left to discard the oldest state
+    // If the stack is full, shift everything left and free the oldest state's memory
     if (undo_stack_top >= MAX_UNDO - 1) {
+        if (undo_stack[0].buffer != NULL) {
+            for (int j = 0; j < undo_stack[0].line_count; j++) {
+                free(undo_stack[0].buffer[j]);
+            }
+            free(undo_stack[0].buffer);
+        }
         for (int i = 0; i < MAX_UNDO - 1; i++) {
             undo_stack[i] = undo_stack[i + 1];
         }
@@ -57,13 +63,27 @@ void save_undo_state() {
 
     undo_stack_top++;
     
-    // Copy current state into the stack slot
-    memcpy(undo_stack[undo_stack_top].buffer, buffer, sizeof(buffer));
+    // Clear out any old allocations in this slot before overwriting it
+    if (undo_stack[undo_stack_top].buffer != NULL) {
+        for (int j = 0; j < undo_stack[undo_stack_top].line_count; j++) {
+            free(undo_stack[undo_stack_top].buffer[j]);
+        }
+        free(undo_stack[undo_stack_top].buffer);
+    }
+
+    // Capture standard integers
     undo_stack[undo_stack_top].line_count = line_count;
     undo_stack[undo_stack_top].current_line = current_line;
     undo_stack[undo_stack_top].cursor_x = cursor_x;
     undo_stack[undo_stack_top].scroll_y = scroll_y;
     undo_stack[undo_stack_top].is_modified = is_modified;
+
+    // Dynamically allocate only the rows we actually need right now
+    undo_stack[undo_stack_top].buffer = malloc(line_count * sizeof(char *));
+    for (int i = 0; i < line_count; i++) {
+        undo_stack[undo_stack_top].buffer[i] = malloc(MAX_LINE_LEN * sizeof(char));
+        memcpy(undo_stack[undo_stack_top].buffer[i], buffer[i], MAX_LINE_LEN);
+    }
 
     is_modified = 1;
 } // End save_undo_state
@@ -74,21 +94,42 @@ void undo() {
         return;
     }
 
-    // Restore state from stack top
-    memcpy(buffer, undo_stack[undo_stack_top].buffer, sizeof(buffer));
+    // Restore standard properties
     line_count = undo_stack[undo_stack_top].line_count;
     current_line = undo_stack[undo_stack_top].current_line;
     cursor_x = undo_stack[undo_stack_top].cursor_x;
     scroll_y = undo_stack[undo_stack_top].scroll_y;
     is_modified = undo_stack[undo_stack_top].is_modified;
 
-    undo_stack_top--; // Pop it off
+    // Restore the text rows from the dynamic snapshot back into the global matrix
+    for (int i = 0; i < line_count; i++) {
+        memcpy(buffer[i], undo_stack[undo_stack_top].buffer[i], MAX_LINE_LEN);
+    }
+
+    // Free the heap allocations for this popped state
+    for (int j = 0; j < line_count; j++) {
+        free(undo_stack[undo_stack_top].buffer[j]);
+    }
+    free(undo_stack[undo_stack_top].buffer);
+    undo_stack[undo_stack_top].buffer = NULL;
+
+    undo_stack_top--; 
     snprintf(status_msg, sizeof(status_msg), "Undo!");
 } // End undo
 
 // Function to handle the "Open" command
 // 1. Silent file loader used by both main() and the menu
 void load_file(const char *filename) {
+    while (undo_stack_top >= 0) {
+        if (undo_stack[undo_stack_top].buffer != NULL) {
+            for (int j = 0; j < undo_stack[undo_stack_top].line_count; j++) {
+                free(undo_stack[undo_stack_top].buffer[j]);
+            }
+            free(undo_stack[undo_stack_top].buffer);
+            undo_stack[undo_stack_top].buffer = NULL;
+        }
+        undo_stack_top--;
+    }
     undo_stack_top = -1; // --- ADD THIS TO CLEAR UNDO ON LOAD ---
 
     memset(line_modified, 0, sizeof(line_modified));
@@ -1303,6 +1344,17 @@ int main(int argc, char *argv[]) {
             }
         }
     } // <--- Closes the while(1) loop
+
+    // --- CLEAN UP REMAINING ALLOCATIONS BEFORE EXIT ---
+    while (undo_stack_top >= 0) {
+        if (undo_stack[undo_stack_top].buffer != NULL) {
+            for (int j = 0; j < undo_stack[undo_stack_top].line_count; j++) {
+                free(undo_stack[undo_stack_top].buffer[j]);
+            }
+            free(undo_stack[undo_stack_top].buffer);
+        }
+        undo_stack_top--;
+    }
 
     endwin();
     return 0;
