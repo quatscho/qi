@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <ncurses.h>
 #include <termios.h> 
@@ -181,19 +182,21 @@ void draw_screen() {
     start_color();
     init_pair(1, COLOR_YELLOW, COLOR_BLACK); 
     init_pair(2, COLOR_RED, COLOR_BLACK);
+    
+    // --- NEW COLOR INITIALIZATIONS FOR SYNTAX ---
+    init_pair(3, COLOR_CYAN, COLOR_BLACK);   // Keywords (if, while, etc.)
+    init_pair(4, COLOR_MAGENTA, COLOR_BLACK);// Strings & Numbers
+    init_pair(5, COLOR_GREEN, COLOR_BLACK);  // Comments (//)
 
     // 1. Draw the top header area (Row 0)
     move(0, 0);
     clrtoeol();
-    // Highlight the file name with our attention color pair
     attron(COLOR_PAIR(1));
-
     if (is_modified) {
         printw(" File: %s * (unsaved)", current_filename);
     } else {
         printw(" File: %s ", current_filename);
     }
-
     attroff(COLOR_PAIR(1));
 
     // 2. Draw the thin top horizontal separator line (Row 1)
@@ -203,17 +206,14 @@ void draw_screen() {
         mvaddch(1, x, ACS_HLINE);
     }
 
-    // FIX: Reduce by 4 now (2 rows for header/top bar, 2 rows for bottom bar/commands)
     int max_displayable_lines = LINES - 4; 
 
     // Render the file content lines
     for (int i = 0; i < max_displayable_lines; i++) {
         int file_line_index = scroll_y + i;
         
-        // Stop drawing if we reach the end of the file contents
         if (file_line_index >= line_count) break;
 
-        // Calculate screen row index (offset by +2 to stay below the top header bar)
         int screen_row = i + 2;
 
         // Draw the line number
@@ -228,8 +228,103 @@ void draw_screen() {
         // Draw the vertical separator
         mvaddch(screen_row, 4, ACS_VLINE);
 
-        // Draw the text string
-        mvprintw(screen_row, 6, "%s", buffer[file_line_index]);
+        // --- UPGRADED SYNTAX HIGHLIGHT SCANNER ---
+        char *line = buffer[file_line_index];
+        int len = strlen(line);
+        int in_string = 0;
+        int in_char = 0;
+
+        move(screen_row, 6);
+
+        int leading_space = 0;
+        while (leading_space < len && (line[leading_space] == ' ' || line[leading_space] == '\t')) {
+            printw("%c", line[leading_space]);
+            leading_space++;
+        }
+
+        for (int j = leading_space; j < len; j++) {
+            if (j == leading_space && line[j] == '#') {
+                attron(COLOR_PAIR(3));
+                printw("%s", &line[j]);
+                attroff(COLOR_PAIR(3));
+                break;
+            }
+
+            if (!in_string && !in_char && line[j] == '/' && line[j+1] == '/') {
+                attron(COLOR_PAIR(5));
+                printw("%s", &line[j]);
+                attroff(COLOR_PAIR(5));
+                break; 
+            }
+
+            if (line[j] == '\'' && !in_string) {
+                if (in_char) {
+                    printw("%c", line[j]);
+                    attroff(COLOR_PAIR(4));
+                    in_char = 0;
+                } else {
+                    attron(COLOR_PAIR(4));
+                    printw("%c", line[j]);
+                    in_char = 1;
+                }
+                continue;
+            }
+            if (in_char) {
+                printw("%c", line[j]);
+                continue;
+            }
+
+            if (line[j] == '"' && !in_char) {
+                if (in_string) {
+                    printw("%c", line[j]);
+                    attroff(COLOR_PAIR(4));
+                    in_string = 0;
+                } else {
+                    attron(COLOR_PAIR(4));
+                    printw("%c", line[j]);
+                    in_string = 1;
+                }
+                continue;
+            }
+            if (in_string) {
+                printw("%c", line[j]);
+                continue;
+            }
+
+            if (j == 0 || (!isalnum((unsigned char)line[j-1]) && line[j-1] != '_')) {
+                char *keywords[] = {
+                    "if", "else", "while", "for", "return", "break", "continue", "switch", "case", "default",
+                    "int", "char", "void", "struct", "typedef", "double", "float", "long", "short", "unsigned",
+                    "static", "const", "extern", "sizeof"
+                };
+                int num_keywords = sizeof(keywords) / sizeof(keywords[0]);
+                int matched = 0;
+
+                for (int k = 0; k < num_keywords; k++) {
+                    int kw_len = strlen(keywords[k]);
+                    if (strncmp(&line[j], keywords[k], kw_len) == 0) {
+                        char next = line[j + kw_len];
+                        if (!isalnum((unsigned char)next) && next != '_') {
+                            attron(COLOR_PAIR(3));
+                            printw("%s", keywords[k]);
+                            attroff(COLOR_PAIR(3));
+                            j += (kw_len - 1); 
+                            matched = 1;
+                            break;
+                        }
+                    }
+                }
+                if (matched) continue;
+            }
+
+            if (isdigit((unsigned char)line[j])) {
+                attron(COLOR_PAIR(4));
+                printw("%c", line[j]);
+                attroff(COLOR_PAIR(4));
+            } else {
+                printw("%c", line[j]);
+            }
+        }
     }
 
     // 3. Draw the bottom horizontal separator line (LINES - 2)
@@ -238,21 +333,20 @@ void draw_screen() {
     for (int x = 0; x < COLS; x++) {
         mvaddch(LINES - 2, x, ACS_HLINE); 
     }    
+
     // 4. Draw the absolute bottom command row (LINES - 1)
     move(LINES - 1, 0);
     clrtoeol();
     
     if (strlen(status_msg) > 0) {
         attron(COLOR_PAIR(1));
-        // Force the status message to clip precisely at terminal width (COLS - 1)
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
         attroff(COLOR_PAIR(1));
     } else {
-        // Compact menu bar to prevent line wrapping completely
         mvprintw(LINES - 1, 0, "^O Open | ^W Save | ^F Find | ^R Repl | ^G GoTo | ^D DelLines | ^U Undo | ^Q Quit");
     }
     
-    // Adjust physical cursor position to match the shifted text view (+2 offset)
+    // Adjust physical cursor position (+2 vertical, +6 horizontal offset alignment)
     move((current_line - scroll_y) + 2, cursor_x + 6); 
 
     refresh();
