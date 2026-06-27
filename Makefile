@@ -3,13 +3,14 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O2
 LIBS = -lncurses
 TARGET = qi
+SRCS = qi.c tracker.c
 INSTALL_DIR = $(HOME)/bin
 
 # Default target to compile the executable
 all: $(TARGET)
 
-$(TARGET): qi.c
-	$(CC) $(CFLAGS) qi.c -o $(TARGET) $(LIBS)
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LIBS)
 
 # Install target to move the binary to ~/bin
 install: $(TARGET)

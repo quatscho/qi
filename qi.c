@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.7 (2026)
+ * Version: 1.0.8 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -15,12 +15,13 @@
 #include <ncurses.h>
 #include <termios.h> 
 #include <unistd.h> 
+#include "tracker.h"
 
 #define MAX_LINES 50000
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.7"
+#define VERSION "1.0.8"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -343,10 +344,10 @@ void draw_screen() {
                 attroff(COLOR_PAIR(4));
             } else {
                 // UNIQUE UNSAVED TEXT COLOR LOGIC
-                if (line_modified[file_line_index]) {
-                    attron(COLOR_PAIR(6));
+                if (tracker_is_modified(file_line_index, j)) {
+                    attron(COLOR_PAIR(1));
                     printw("%c", line[j]);
-                    attroff(COLOR_PAIR(6));
+                    attroff(COLOR_PAIR(1));
                 } else { 
                     printw("%c", line[j]);
             }
@@ -777,6 +778,9 @@ int main(int argc, char *argv[]) {
     noecho();
     curs_set(1);
 
+    // Start tracking
+    tracker_init(MAX_LINES, MAX_LINE_LEN);
+
     // Check if a filename argument was provided
     if (argc > 1) {
         load_file(argv[1]);
@@ -1022,7 +1026,7 @@ int main(int argc, char *argv[]) {
 
                 memmove(&buffer[current_line][cursor_x + 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
                 buffer[current_line][cursor_x] = (char)ch;
-                line_modified[current_line] = 1;
+                tracker_set_modified(current_line, cursor_x, 1);
                 cursor_x++;
             }
         }
