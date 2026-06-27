@@ -1,13 +1,12 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.17 (2026)
+ * Version: 1.0.18 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
  * change tracking, and basic C syntax highlighting.
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -21,7 +20,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.17"
+#define VERSION "1.0.18"
 
 typedef struct {
     char **buffer;
@@ -475,7 +474,7 @@ void draw_screen() {
     // 4. Draw the absolute bottom command row (LINES - 1)
     move(LINES - 1, 0);
     clrtoeol();
-    
+
     if (strlen(status_msg) > 0) {
         attron(COLOR_PAIR(1));
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
@@ -483,9 +482,10 @@ void draw_screen() {
     } else {
         if (!is_modified) {
             // Initial state: Show the standard editor tagline
-            mvprintw(LINES - 1, 0, "qi text editor, v.%s (c) 2026, Christopher Camacho (^? for Help)", VERSION);
+            mvprintw(LINES - 1, 0, "qi text editor, v.%s (c) 2026, Christopher Camacho | Cur: %d/%d | (^? for Help)", 
+                     VERSION, current_line + 1, cursor_x + 1);
         } else {
-            // Modified state: Calculate metrics using buffer and tracker data
+            // Modified state: Calculate metrics and show cursor
             int total_chars = 0;
             int modified_chars = 0;
             int modified_lines = 0;
@@ -506,11 +506,11 @@ void draw_screen() {
                 }
             }
 
-            // Display live counts while keeping the help hint persistent
-            mvprintw(LINES - 1, 0, "Lines Mod: %d | Chars Mod: %d | Total Chars: %d | (^? for Help)", 
-                     modified_lines, modified_chars, total_chars);
+            // Display live counts, live cursor position, and help hint
+            mvprintw(LINES - 1, 0, "Lines Mod: %d | Chars Mod: %d | Total Chars: %d | Cur: %d/%d | (^? for Help)", 
+                     modified_lines, modified_chars, total_chars, current_line + 1, cursor_x + 1);
         }
-    }
+    }    
     
     // --- INTEGRATED PHYSICAL CURSOR MATH FOR WRAPPING ---
     int cursor_physical_row = 2;
@@ -1177,6 +1177,7 @@ int main(int argc, char *argv[]) {
                 while (cursor_x > 0 && isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
                 while (cursor_x > 0 && !isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
             }
+            draw_screen();
             continue;
         } else if (ch == 402 || ch == 560 || ch == 261 || ch == 544) { 
             // --- BACKUP / macOS WORD HOP RIGHT (Option + Right Arrow) ---
@@ -1185,6 +1186,7 @@ int main(int argc, char *argv[]) {
                 while (cursor_x < len && !isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
                 while (cursor_x < len && isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
             }
+            draw_screen();
             continue;
         } else if (ch == KEY_PPAGE) {
             // --- PAGE UP ---
