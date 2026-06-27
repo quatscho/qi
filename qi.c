@@ -739,7 +739,7 @@ void show_help_window() {
     mvwprintw(help_win, 5, 4, "^F  Find Text");
     mvwprintw(help_win, 6, 4, "^R  Replace Text");
     mvwprintw(help_win, 7, 4, "^G  Go To Line");
-    mvwprintw(help_win, 8, 4, "^D  Delete Line");
+    mvwprintw(help_win, 8, 4, "^D  Delete Line(s)");
     mvwprintw(help_win, 9, 4, "^U  Undo Action");
     mvwprintw(help_win, 10, 4, "^Q  Quit Editor");
     
