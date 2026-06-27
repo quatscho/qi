@@ -1103,27 +1103,67 @@ int main(int argc, char *argv[]) {
             scroll_y = current_line - max_displayable_lines + 1;
             if (scroll_y < 0) scroll_y = 0;
         }
+
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
                 
-                // --- SCROLLOFF: Maintain a 3-line margin at the top ---
-                if (current_line - scroll_y < 3) {
-                    scroll_y = current_line - 3;
-                    if (scroll_y < 0) scroll_y = 0;
+                // --- VISUAL SCROLLOFF: Calculate real visual row gap ---
+                int available_width = COLS - 6;
+                int visual_rows_above = 0;
+                
+                for (int i = scroll_y; i < current_line; i++) {
+                    int l_len = strlen(buffer[i]);
+                    int l_rows = (l_len / available_width) + 1;
+                    if (l_len == 0) l_rows = 1;
+                    visual_rows_above += l_rows;
+                }
+
+                // If our active target line is within 3 visual rows of the top view boundary
+                if (visual_rows_above < 3 && scroll_y > 0) {
+                    // Slide the camera up by array elements until we clear the visual buffer zone
+                    while (scroll_y > 0 && visual_rows_above < 3) {
+                        scroll_y--;
+                        
+                        // Recalculate visual row gap with updated scroll_y
+                        visual_rows_above = 0;
+                        for (int i = scroll_y; i < current_line; i++) {
+                            int l_len = strlen(buffer[i]);
+                            int l_rows = (l_len / available_width) + 1;
+                            if (l_len == 0) l_rows = 1;
+                            visual_rows_above += l_rows;
+                        }
+                    }
                 }
 
                 int len = strlen(buffer[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
+
         } else if (ch == KEY_DOWN) {
             if (current_line < line_count - 1) {
                 current_line++;
                 
                 int max_displayable_lines = LINES - 4;
+                int available_width = COLS - 6;
                 
-                // --- SCROLLOFF: Maintain a 3-line margin at the bottom ---
-                if ((scroll_y + max_displayable_lines) - current_line <= 3) {
+                // Calculate visual row position of current_line relative to scroll_y
+                int visual_row_index = 0;
+                for (int i = scroll_y; i <= current_line; i++) {
+                    int l_len = strlen(buffer[i]);
+                    int l_rows = (l_len / available_width) + 1;
+                    if (l_len == 0) l_rows = 1;
+                    
+                    if (i < current_line) {
+                        visual_row_index += l_rows;
+                    } else {
+                        // Include the lines wrapped by the current cursor row itself
+                        visual_row_index += (cursor_x / available_width);
+                    }
+                }
+
+                // --- VISUAL SCROLLOFF: Trigger slide if inside 3 rows from the bottom border ---
+                if (max_displayable_lines - visual_row_index <= 3) {
                     scroll_y++;
                     if (scroll_y > line_count - max_displayable_lines) {
                         scroll_y = line_count - max_displayable_lines;
@@ -1134,6 +1174,7 @@ int main(int argc, char *argv[]) {
                 int len = strlen(buffer[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
+
         } else if (ch == KEY_LEFT) {
             if (cursor_x > 0) cursor_x--;
         } else if (ch == KEY_RIGHT) {
@@ -1279,9 +1320,19 @@ int main(int argc, char *argv[]) {
                 cursor_x = 0;
                 line_count++;
 
-                // --- SCROLLOFF: Slide viewport camera if Enter pushes into the bottom margin ---
+                // --- VISUAL SCROLLOFF: Handle viewport updates for layout wrapping on Enter ---
                 int max_displayable_lines = LINES - 4;
-                if ((scroll_y + max_displayable_lines) - current_line <= 3) {
+                int available_width = COLS - 6;
+                int visual_row_index = 0;
+                
+                for (int i = scroll_y; i < current_line; i++) {
+                    int l_len = strlen(buffer[i]);
+                    int l_rows = (l_len / available_width) + 1;
+                    if (l_len == 0) l_rows = 1;
+                    visual_row_index += l_rows;
+                }
+
+                if (max_displayable_lines - visual_row_index <= 3) {
                     scroll_y++;
                     if (scroll_y > line_count - max_displayable_lines) {
                         scroll_y = line_count - max_displayable_lines;
