@@ -1,7 +1,7 @@
-/*
+/* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.10 (2026)
+ * Version: 1.0.11 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.10"
+#define VERSION "1.0.11"
 
 typedef struct {
     char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -395,8 +395,35 @@ void draw_screen() {
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
         attroff(COLOR_PAIR(1));
     } else {
-        mvprintw(LINES - 1, 0, "qi text editor, v.%s (c) 2026, Christopher Camacho (^? for Help)", VERSION);
-        //mvprintw(LINES - 1, 0, "^O Open | ^W Save | ^F Find | ^R Repl | ^G GoTo | ^D DelLines | ^U Undo | ^Q Quit");
+        if (!is_modified) {
+            // Initial state: Show the standard editor tagline
+            mvprintw(LINES - 1, 0, "qi text editor, v.%s (c) 2026, Christopher Camacho (^? for Help)", VERSION);
+        } else {
+            // Modified state: Calculate metrics using buffer and tracker data
+            int total_chars = 0;
+            int modified_chars = 0;
+            int modified_lines = 0;
+
+            for (int i = 0; i < line_count; i++) {
+                int len = strlen(buffer[i]);
+                total_chars += len;
+
+                int line_has_mod = 0;
+                for (int j = 0; j < len; j++) {
+                    if (tracker_is_modified(i, j)) {
+                        modified_chars++;
+                        line_has_mod = 1;
+                    }
+                }
+                if (line_has_mod) {
+                    modified_lines++;
+                }
+            }
+
+            // Display live counts while keeping the help hint persistent
+            mvprintw(LINES - 1, 0, "Lines Mod: %d | Chars Mod: %d | Total Chars: %d | (^? for Help)", 
+                     modified_lines, modified_chars, total_chars);
+        }
     }
     
     // Adjust physical cursor position (+2 vertical, +6 horizontal offset alignment)
@@ -659,7 +686,11 @@ void replace_text() {
         current_idx++;
     }
 
-    snprintf(status_msg, sizeof(status_msg), "Replaced %d occurrence(s).", replaced_count);
+    if (replaced_count > 0) {
+        snprintf(status_msg, sizeof(status_msg), "Replaced %s with %s (%d instances%s)", search_str, replace_str, replaced_count, replaced_count == 1 ? "" : "s");
+    } else {
+        snprintf(status_msg, sizeof(status_msg), "No replacements made.");
+    }
 }
 
 void goto_line() {
@@ -765,6 +796,11 @@ void delete_lines_interactive() {
 
     if (strlen(input) == 0) return;
 
+    // Save a clean copy of the user's raw input string before strtok cuts it up
+    char saved_input_copy[256];
+    strncpy(saved_input_copy, input, sizeof(saved_input_copy) - 1);
+    saved_input_copy[sizeof(saved_input_copy) - 1] = '\0';
+
     char to_delete[MAX_LINES];
     memset(to_delete, 0, sizeof(to_delete));
 
@@ -827,7 +863,11 @@ void delete_lines_interactive() {
     }
     if (scroll_y < 0) scroll_y = 0;
 
-    snprintf(status_msg, sizeof(status_msg), "Deleted %d line(s).", deleted_count); 
+    if (deleted_count > 0) {
+        snprintf(status_msg, sizeof(status_msg), "Deleted lines %s", saved_input_copy);
+    } else {
+        snprintf(status_msg, sizeof(status_msg), "No lines deleted.");
+    }
 }
 
 void show_help_window() {
