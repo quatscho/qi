@@ -1,12 +1,12 @@
-   /* h 
+/* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.22 (2026)
+ * Version: 1.0.23 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
  * change tracking, and basic C syntax highlighting.
- */
+ */                                                                                                
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -20,7 +20,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.22"
+#define VERSION "1.0.23"
 
 typedef struct {
     char **buffer;
@@ -467,6 +467,19 @@ void draw_screen() {
             mvprintw(LINES - 1, 0, "Lines Mod: %d | Chars Mod: %d | Total Chars: %d | Cur: %d/%d | (^? for Help)", modified_lines, modified_chars, total_chars, current_line + 1, cursor_x + 1);
         }
     }    
+
+    // --- ADD SOLID VERTICAL MARGIN LINE AT COLUMN 81 ---
+    if (COLS > 81) {
+        for (int r = 2; r < LINES - 2; r++) {
+            chtype ch_at = mvinch(r, 81);
+            // Only draw if the position is empty (space) to avoid overwriting text
+            if ((ch_at & A_CHARTEXT) == ' ') {
+                attron(A_DIM);
+                mvaddch(r, 81, ACS_VLINE);
+                attroff(A_DIM);
+            }
+        }
+    }
     
     int cursor_physical_row = 2;
     for (int i = scroll_y; i < current_line; i++) {
@@ -481,7 +494,7 @@ void draw_screen() {
     else move(LINES - 3, COLS - 1);
 
     refresh();
-}
+} // End draw_screen
 
 void find_text() {
     char search_str[128];
