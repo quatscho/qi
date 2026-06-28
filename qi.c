@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.19 (2026)
+ * Version: 1.0.20 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -20,7 +20,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.19"
+#define VERSION "1.0.20"
 
 typedef struct {
     char **buffer;
@@ -44,6 +44,7 @@ char current_filename[256] = "untitled.txt";
 char status_msg[256] = "";
 int is_modified = 0;
 int line_modified[MAX_LINES] = {0};
+int mod_count = 0;
 
 void save_undo_state() {
     // If the stack is full, shift everything left and free the oldest state's memory safely
@@ -127,6 +128,7 @@ void undo() {
 // Function to handle the "Open" command
 // 1. Silent file loader used by both main() and the menu
 void load_file(const char *filename) {
+    // 1. Existing cleanup for undo_stack
     while (undo_stack_top >= 0) {
         if (undo_stack[undo_stack_top].buffer != NULL) {
             for (int j = 0; j < undo_stack[undo_stack_top].line_count; j++) {
@@ -137,11 +139,30 @@ void load_file(const char *filename) {
         }
         undo_stack_top--;
     }
-    undo_stack_top = -1; // --- ADD THIS TO CLEAR UNDO ON LOAD ---
+    undo_stack_top = -1;
 
+    // 2. Check for Swap File
+    char swp_filename[256];
+    snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", filename);
+    
+    const char *target_file = filename;
+    FILE *swp_fp = fopen(swp_filename, "r");
+    if (swp_fp) {
+        fclose(swp_fp);
+        // Prompt for recovery
+        mvprintw(LINES - 1, 0, "Swap file detected for '%s'. Recover? (y/n): ", filename);
+        clrtoeol();
+        refresh();
+        int ch = getch();
+        if (ch == 'y' || ch == 'Y') {
+            target_file = swp_filename;
+            snprintf(status_msg, sizeof(status_msg), "Recovered from swap file.");
+        }
+    }
+
+    // 3. Perform the load
     memset(line_modified, 0, sizeof(line_modified));
-
-    FILE *fp = fopen(filename, "r");
+    FILE *fp = fopen(target_file, "r");
     if (fp) {
         line_count = 0;
         while (fgets(buffer[line_count], MAX_LINE_LEN, fp) && line_count < MAX_LINES) {
@@ -150,20 +171,17 @@ void load_file(const char *filename) {
         }
         fclose(fp);
         strncpy(current_filename, filename, sizeof(current_filename) - 1);
-        
-        // Reset view positions to the top of the newly loaded file
         scroll_y = 0;
         current_line = 0;
         cursor_x = 0;
         is_modified = 0;
     } else {
-        // If file doesn't exist, treat it as a new file under that name
         strncpy(current_filename, filename, sizeof(current_filename) - 1);
         line_count = 1;
         buffer[0][0] = '\0';
         is_modified = 0;
     }
-} // End load_file
+}
 
 // 2. Interactive menu command when you press Ctrl+O
 void interactive_open() {
@@ -256,6 +274,11 @@ void save_file() {
         }
         fclose(fp);
 
+        // Remove swp file
+        char swp_filename[256];
+        snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", current_filename);
+        unlink(swp_filename); // Removes the swap file after a successful manual save
+
         is_modified = 0;
 
         memset(line_modified, 0, sizeof(line_modified));
@@ -268,6 +291,19 @@ void save_file() {
         getch(); // Keep this one blocking because it's a critical error
     }
 } // End save_file
+
+void auto_save() {
+    char swp_filename[256];
+    snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", current_filename);
+    
+    FILE *fp = fopen(swp_filename, "w");
+    if (fp) {
+        for (int i = 0; i < line_count; i++) {
+            fprintf(fp, "%s\n", buffer[i]);
+        }
+        fclose(fp);
+    }
+} // End auto_save
 
 void draw_screen() {
     // REMOVED clear(); to prevent flicker
@@ -1318,6 +1354,13 @@ int main(int argc, char *argv[]) {
                 buffer[current_line][cursor_x] = (char)ch;
                 tracker_set_modified(current_line, cursor_x, 1);
                 cursor_x++;
+
+                // --- ADD AUTO-SAVE TRIGGER ---
+                mod_count++;
+                if (mod_count >= 50) {
+                    auto_save();
+                    mod_count = 0;
+                }
             }
         }
 	} // <--- Closes the while(1) loop
