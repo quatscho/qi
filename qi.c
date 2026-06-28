@@ -1,7 +1,7 @@
-/* 
+/* h 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.20 (2026)
+ * Version: 1.0.21 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -20,7 +20,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.20"
+#define VERSION "1.0.21"
 
 typedef struct {
     char **buffer;
@@ -530,14 +530,26 @@ void find_text() {
 
     // Scan entire file buffer for occurrences
     for (int i = 0; i < line_count; i++) {
-        char *ptr = buffer[i];
-        while ((ptr = strstr(ptr, search_str)) != NULL) {
+        char lower_line[MAX_LINE_LEN];
+        char lower_search[128];
+
+        // Convert both strings to lowercase for comparison
+        for (int j = 0; buffer[i][j] && j < MAX_LINE_LEN - 1; j++) 
+            lower_line[j] = tolower((unsigned char)buffer[i][j]);
+        lower_line[strlen(buffer[i])] = '\0';
+        
+        for (int j = 0; search_str[j] && j < 127; j++) 
+            lower_search[j] = tolower((unsigned char)search_str[j]);
+        lower_search[strlen(search_str)] = '\0';
+
+        char *ptr = lower_line;
+        while ((ptr = strstr(ptr, lower_search)) != NULL) {
             if (match_count < 500) {
                 matches[match_count].line = i;
-                matches[match_count].col = (int)(ptr - buffer[i]);
+                matches[match_count].col = (int)(ptr - lower_line);
                 match_count++;
             }
-            ptr++; // Move forward 1 char to catch overlapping matches
+            ptr++; // Move forward to catch overlapping matches
         }
     }
 
