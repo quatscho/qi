@@ -1,7 +1,7 @@
-/* h 
+   /* h 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.21 (2026)
+ * Version: 1.0.22 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -20,7 +20,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.21"
+#define VERSION "1.0.22"
 
 typedef struct {
     char **buffer;
@@ -45,6 +45,7 @@ char status_msg[256] = "";
 int is_modified = 0;
 int line_modified[MAX_LINES] = {0};
 int mod_count = 0;
+int overwrite_mode = 0; // 0 = Insert, 1 = Overwrite
 
 void save_undo_state() {
     // If the stack is full, shift everything left and free the oldest state's memory safely
@@ -925,7 +926,7 @@ void delete_lines_interactive() {
 
 void show_help_window() {
     // 1. Calculate dimensions and centering
-    int height = 16;
+    int height = 18;
     int width = 50;
     int start_y = (LINES - height) / 2;
     int start_x = (COLS - width) / 2;
@@ -955,9 +956,10 @@ void show_help_window() {
     mvwprintw(help_win, 9, 4, "^U  Undo Action");
     mvwprintw(help_win, 10, 4, "^T Jump to Start of File");
     mvwprintw(help_win, 11, 4, "^B Jump to End of File");
-    mvwprintw(help_win, 12, 4, "^Q  Quit Editor");
+    mvwprintw(help_win, 12, 4, "^X Toggle Insert/Overwrite Modes");
+    mvwprintw(help_win, 13, 4, "^Q Quit Editor");
     
-    mvwprintw(help_win, 14, (width - 24) / 2, "Press any key to close");
+    mvwprintw(help_win, 15, (width - 24) / 2, "Press any key to close");
 
     // 5. Refresh to show the popup overlay
     wrefresh(help_win);
@@ -1042,6 +1044,10 @@ int main(int argc, char *argv[]) {
         else if (ch == CTRL_KEY('g')) goto_line();
         else if (ch == CTRL_KEY('u')) undo();
         else if (ch == CTRL_KEY('d')) delete_lines_interactive();
+        else if (ch == CTRL_KEY('x')) {
+            overwrite_mode = !overwrite_mode;
+            snprintf(status_msg, sizeof(status_msg), "Mode: %s", overwrite_mode ? "OVERWRITE" : "INSERT");
+        }
         else if (ch == CTRL_KEY('t')) { // Top of file
             current_line = 0;
             cursor_x = 0;
@@ -1230,34 +1236,29 @@ int main(int argc, char *argv[]) {
             cursor_x = (int)strlen(buffer[current_line]);         
 
         } else if (ch == 9) {
-            // Intercept Tab (ASCII 9)
             int len = strlen(buffer[current_line]);
-            
-            // Check if we are working on a Makefile to determine tab style
             int is_makefile = (strstr(current_filename, "Makefile") != NULL);
             int tab_size = is_makefile ? 1 : 4;
             
             if (len + tab_size < MAX_LINE_LEN) {
                 save_undo_state();
                 
-                // Shift text to the right to make room
+                // Force an insertion regardless of the global overwrite_mode state
                 memmove(&buffer[current_line][cursor_x + tab_size], 
                         &buffer[current_line][cursor_x], 
                         len - cursor_x + 1);
                 
                 if (is_makefile) {
-                    // Insert a true hardware tab character
                     buffer[current_line][cursor_x] = '\t';
                     tracker_set_modified(current_line, cursor_x, 1);
                 } else {
-                    // Fill the slot with 4 space characters
                     for (int i = 0; i < tab_size; i++) {
                         buffer[current_line][cursor_x + i] = ' ';
                         tracker_set_modified(current_line, cursor_x + i, 1);
                     }
                 }
-                
-                cursor_x += tab_size; // Advance the cursor forward
+                cursor_x += tab_size; 
+                // DO NOT add any extra braces or continue statements here
             }
 
         } else if (ch == 10 || ch == 13) {
@@ -1356,16 +1357,26 @@ int main(int argc, char *argv[]) {
             // Handle typing a character
             int len = strlen(buffer[current_line]);
             if (cursor_x <= len) {
+                save_undo_state();
 
                 // Only take an undo snapshot when starting a new word or at line start
                 if (cursor_x == 0 || (buffer[current_line][cursor_x - 1] == ' ' && ch != ' ')) {
                     save_undo_state();
                 }
 
-                memmove(&buffer[current_line][cursor_x + 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
-                buffer[current_line][cursor_x] = (char)ch;
+                if (overwrite_mode && cursor_x < len) {
+                // Overwrite mode: just replace the character
+                    buffer[current_line][cursor_x] = (char)ch;
+                } else {
+                    // Insert mode (or at end of line): shift characters right
+                    if (len + 1 < MAX_LINE_LEN) {
+                        memmove(&buffer[current_line][cursor_x + 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
+                        buffer[current_line][cursor_x] = (char)ch;
+                    }
+                }
                 tracker_set_modified(current_line, cursor_x, 1);
                 cursor_x++;
+
 
                 // --- ADD AUTO-SAVE TRIGGER ---
                 mod_count++;
