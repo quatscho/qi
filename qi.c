@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.18 (2026)
+ * Version: 1.0.19 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -20,7 +20,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 50
-#define VERSION "1.0.18"
+#define VERSION "1.0.19"
 
 typedef struct {
     char **buffer;
@@ -270,20 +270,16 @@ void save_file() {
 } // End save_file
 
 void draw_screen() {
-    clear();
+    // REMOVED clear(); to prevent flicker
+
     start_color();
     init_pair(1, COLOR_YELLOW, COLOR_BLACK); 
     init_pair(2, COLOR_RED, COLOR_BLACK);
-    
-    // --- NEW COLOR INITIALIZATIONS FOR SYNTAX ---
-    init_pair(3, COLOR_CYAN, COLOR_BLACK);   // Keywords (if, while, etc.)
-    init_pair(4, COLOR_MAGENTA, COLOR_BLACK);// Strings & Numbers
-    init_pair(5, COLOR_GREEN, COLOR_BLACK);  // Comments (//)
-
-    // --- NEW COLOR PAIR FOR NEW TEXT ---
+    init_pair(3, COLOR_CYAN, COLOR_BLACK);
+    init_pair(4, COLOR_MAGENTA, COLOR_BLACK);
+    init_pair(5, COLOR_GREEN, COLOR_BLACK);
     init_pair(6, COLOR_YELLOW, COLOR_BLACK);
 
-    // 1. Draw the top header area (Row 0)
     move(0, 0);
     clrtoeol();
     attron(COLOR_PAIR(1));
@@ -294,7 +290,6 @@ void draw_screen() {
     }
     attroff(COLOR_PAIR(1));
 
-    // 2. Draw the thin top horizontal separator line (Row 1)
     move(1, 0);
     clrtoeol();
     for (int x = 0; x < COLS; x++) {
@@ -302,34 +297,35 @@ void draw_screen() {
     }
 
     int max_displayable_lines = LINES - 4; 
-    int physical_row = 2; // Start rendering text at physical row 2
+    int physical_row = 2; 
 
-    // Render the file content lines
     for (int i = 0; i < max_displayable_lines; i++) {
         int file_line_index = scroll_y + i;
         
-        if (file_line_index >= line_count) break;
-        if (physical_row >= LINES - 2) break; // Don't overwrite the bottom border!
+        move(physical_row, 0);
+        clrtoeol();
 
-        // Draw the line number at the start of this buffer line's physical space
+        if (file_line_index >= line_count) {
+            physical_row++;
+            continue;
+        }
+
         if (file_line_index == current_line) {
             attron(COLOR_PAIR(1));
             mvprintw(physical_row, 0, "%3d ", file_line_index + 1); 
             attroff(COLOR_PAIR(1));
+            attron(COLOR_PAIR(1) | A_BOLD);
+            mvaddch(physical_row, 4, ACS_DIAMOND); 
+            attroff(COLOR_PAIR(1) | A_BOLD);
         } else {
             mvprintw(physical_row, 0, "%3d ", file_line_index + 1);
+            mvaddch(physical_row, 4, ACS_VLINE);
         }
 
-        // Draw the vertical separator
-        mvaddch(physical_row, 4, ACS_VLINE);
-
-        // --- UPGRADED SYNTAX HIGHLIGHT SCANNER ---
         char *line = buffer[file_line_index];
         int len = strlen(line);
         int in_string = 0;
         int in_char = 0;
-
-        // Track where we are drawing *within* the editor line text area
         int available_width = COLS - 6; 
         int current_phys_row = physical_row;
         int current_phys_col = 6;
@@ -349,191 +345,106 @@ void draw_screen() {
         }
 
         for (int j = leading_space; j < len; j++) {
-            // Check if we need to wrap the screen row manually for printing
             if (current_phys_col >= COLS) {
                 current_phys_row++;
                 current_phys_col = 6;
                 move(current_phys_row, current_phys_col);
             }
-
             if (j == leading_space && line[j] == '#') {
                 attron(COLOR_PAIR(3));
                 printw("%s", &line[j]);
                 attroff(COLOR_PAIR(3));
                 break;
             }
-
             if (!in_string && !in_char && line[j] == '/' && line[j+1] == '/') {
                 attron(COLOR_PAIR(5));
                 printw("%s", &line[j]);
                 attroff(COLOR_PAIR(5));
                 break; 
             }
-
             if (line[j] == '\'' && !in_string) {
-                if (in_char) {
-                    printw("%c", line[j]);
-                    attroff(COLOR_PAIR(4));
-                    in_char = 0;
-                } else {
-                    attron(COLOR_PAIR(4));
-                    printw("%c", line[j]);
-                    in_char = 1;
-                }
-                current_phys_col++;
-                continue;
+                if (in_char) { printw("%c", line[j]); attroff(COLOR_PAIR(4)); in_char = 0; }
+                else { attron(COLOR_PAIR(4)); printw("%c", line[j]); in_char = 1; }
+                current_phys_col++; continue;
             }
-            if (in_char) {
-                printw("%c", line[j]);
-                current_phys_col++;
-                continue;
-            }
-
+            if (in_char) { printw("%c", line[j]); current_phys_col++; continue; }
             if (line[j] == '"' && !in_char) {
-                if (in_string) {
-                    printw("%c", line[j]);
-                    attroff(COLOR_PAIR(4));
-                    in_string = 0;
-                } else {
-                    attron(COLOR_PAIR(4));
-                    printw("%c", line[j]);
-                    in_string = 1;
-                }
-                current_phys_col++;
-                continue;
+                if (in_string) { printw("%c", line[j]); attroff(COLOR_PAIR(4)); in_string = 0; }
+                else { attron(COLOR_PAIR(4)); printw("%c", line[j]); in_string = 1; }
+                current_phys_col++; continue;
             }
-            if (in_string) {
-                printw("%c", line[j]);
-                current_phys_col++;
-                continue;
-            }
-
+            if (in_string) { printw("%c", line[j]); current_phys_col++; continue; }
             if (j == 0 || (!isalnum((unsigned char)line[j-1]) && line[j-1] != '_')) {
-                char *keywords[] = {
-                    "if", "else", "while", "for", "return", "break", "continue", "switch", "case", "default",
-                    "int", "char", "void", "struct", "typedef", "double", "float", "long", "short", "unsigned",
-                    "static", "const", "extern", "sizeof"
-                };
-                int num_keywords = sizeof(keywords) / sizeof(keywords[0]);
+                char *keywords[] = {"if", "else", "while", "for", "return", "break", "continue", "switch", "case", "default", "int", "char", "void", "struct", "typedef", "double", "float", "long", "short", "unsigned", "static", "const", "extern", "sizeof"};
                 int matched = 0;
-
-                for (int k = 0; k < num_keywords; k++) {
+                for (int k = 0; k < 24; k++) {
                     int kw_len = strlen(keywords[k]);
-                    if (strncmp(&line[j], keywords[k], kw_len) == 0) {
-                        char next = line[j + kw_len];
-                        if (!isalnum((unsigned char)next) && next != '_') {
-                            attron(COLOR_PAIR(3));
-                            // Printing a keyword word safely character-by-character to monitor screen margins
-                            for (int m = 0; m < kw_len; m++) {
-                                if (current_phys_col >= COLS) {
-                                    current_phys_row++;
-                                    current_phys_col = 6;
-                                    move(current_phys_row, current_phys_col);
-                                }
-                                printw("%c", keywords[k][m]);
-                                current_phys_col++;
-                            }
-                            attroff(COLOR_PAIR(3));
-                            j += (kw_len - 1); 
-                            matched = 1;
-                            break;
+                    if (strncmp(&line[j], keywords[k], kw_len) == 0 && !isalnum((unsigned char)line[j + kw_len]) && line[j + kw_len] != '_') {
+                        attron(COLOR_PAIR(3));
+                        for (int m = 0; m < kw_len; m++) {
+                            if (current_phys_col >= COLS) { current_phys_row++; current_phys_col = 6; move(current_phys_row, current_phys_col); }
+                            printw("%c", keywords[k][m]); current_phys_col++;
                         }
+                        attroff(COLOR_PAIR(3));
+                        j += (kw_len - 1); matched = 1; break;
                     }
                 }
                 if (matched) continue;
             }
-
-            if (isdigit((unsigned char)line[j])) {
-                attron(COLOR_PAIR(4));
-                printw("%c", line[j]);
-                attroff(COLOR_PAIR(4));
-            } else {
-                if (tracker_is_modified(file_line_index, j)) {
-                    attron(COLOR_PAIR(1));
-                    printw("%c", line[j]);
-                    attroff(COLOR_PAIR(1));
-                } else { 
-                    printw("%c", line[j]);
-                }
-            }
+            if (isdigit((unsigned char)line[j])) { attron(COLOR_PAIR(4)); printw("%c", line[j]); attroff(COLOR_PAIR(4)); }
+            else if (tracker_is_modified(file_line_index, j)) { attron(COLOR_PAIR(1)); printw("%c", line[j]); attroff(COLOR_PAIR(1)); }
+            else { printw("%c", line[j]); }
             current_phys_col++;
         }
-
-        // Advance physical row allocation by how many vertical tracks this buffer line consumed
         int lines_consumed = 1 + (len / available_width);
         physical_row += lines_consumed;
     }
 
-    // 3. Draw the bottom horizontal separator line (LINES - 2)
+    while (physical_row < LINES - 2) {
+        move(physical_row, 0);
+        clrtoeol();
+        physical_row++;
+    }
+
     move(LINES - 2, 0);
     clrtoeol();
-    for (int x = 0; x < COLS; x++) {
-        mvaddch(LINES - 2, x, ACS_HLINE); 
-    }    
+    for (int x = 0; x < COLS; x++) mvaddch(LINES - 2, x, ACS_HLINE); 
 
-    // 4. Draw the absolute bottom command row (LINES - 1)
     move(LINES - 1, 0);
     clrtoeol();
-
     if (strlen(status_msg) > 0) {
         attron(COLOR_PAIR(1));
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
         attroff(COLOR_PAIR(1));
     } else {
-        if (!is_modified) {
-            // Initial state: Show the standard editor tagline
-            mvprintw(LINES - 1, 0, "qi text editor, v.%s (c) 2026, Christopher Camacho | Cur: %d/%d | (^? for Help)", 
-                     VERSION, current_line + 1, cursor_x + 1);
-        } else {
-            // Modified state: Calculate metrics and show cursor
-            int total_chars = 0;
-            int modified_chars = 0;
-            int modified_lines = 0;
-
+        if (!is_modified) mvprintw(LINES - 1, 0, "qi text editor, v.%s (c) 2026, Christopher Camacho | Cur: %d/%d | (^? for Help)", VERSION, current_line + 1, cursor_x + 1);
+        else {
+            int total_chars = 0, modified_chars = 0, modified_lines = 0;
             for (int i = 0; i < line_count; i++) {
                 int len = strlen(buffer[i]);
                 total_chars += len;
-
                 int line_has_mod = 0;
-                for (int j = 0; j < len; j++) {
-                    if (tracker_is_modified(i, j)) {
-                        modified_chars++;
-                        line_has_mod = 1;
-                    }
-                }
-                if (line_has_mod) {
-                    modified_lines++;
-                }
+                for (int j = 0; j < len; j++) { if (tracker_is_modified(i, j)) { modified_chars++; line_has_mod = 1; } }
+                if (line_has_mod) modified_lines++;
             }
-
-            // Display live counts, live cursor position, and help hint
-            mvprintw(LINES - 1, 0, "Lines Mod: %d | Chars Mod: %d | Total Chars: %d | Cur: %d/%d | (^? for Help)", 
-                     modified_lines, modified_chars, total_chars, current_line + 1, cursor_x + 1);
+            mvprintw(LINES - 1, 0, "Lines Mod: %d | Chars Mod: %d | Total Chars: %d | Cur: %d/%d | (^? for Help)", modified_lines, modified_chars, total_chars, current_line + 1, cursor_x + 1);
         }
     }    
     
-    // --- INTEGRATED PHYSICAL CURSOR MATH FOR WRAPPING ---
     int cursor_physical_row = 2;
-    int available_width = COLS - 6;
-
     for (int i = scroll_y; i < current_line; i++) {
         int l_len = strlen(buffer[i]);
-        int l_rows = (l_len / available_width) + 1;
-        if (l_len == 0) l_rows = 1;
-        cursor_physical_row += l_rows;
+        int l_rows = (l_len / (COLS - 6)) + 1;
+        cursor_physical_row += (l_len == 0) ? 1 : l_rows;
     }
+    cursor_physical_row += (cursor_x / (COLS - 6));
+    int cursor_physical_col = 6 + (cursor_x % (COLS - 6));
 
-    cursor_physical_row += (cursor_x / available_width);
-    int cursor_physical_col = 6 + (cursor_x % available_width);
-
-    if (cursor_physical_row < LINES - 2) {
-        move(cursor_physical_row, cursor_physical_col);
-    } else {
-        move(LINES - 3, COLS - 1); // Clamp gracefully if out of visual view bounds
-    }
+    if (cursor_physical_row < LINES - 2) move(cursor_physical_row, cursor_physical_col);
+    else move(LINES - 3, COLS - 1);
 
     refresh();
-} // END draw_screen
+}
 
 void find_text() {
     char search_str[128];
