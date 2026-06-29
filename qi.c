@@ -43,7 +43,7 @@ void save_undo_state_batch(int start_line, int count);
 void undo(void);
 
 // Global state
-char buffer[MAX_LINES][MAX_LINE_LEN];
+char buffer[MAX_LINES][MAX_LINE_LEN] = {0};
 int line_count = 0;
 int current_line = 0;
 int cursor_x = 0;
