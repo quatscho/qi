@@ -1,19 +1,19 @@
-/* 
+/*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
  * Version: 1.0.24 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
- * interactive search and replace, multi-line deletion tools, visual state 
+ * interactive search and replace, multi-line deletion tools, visual state
  * change tracking, and basic C syntax highlighting.
- */                                                                                                
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
 #include <ncurses.h>
-#include <termios.h> 
-#include <unistd.h> 
+#include <termios.h>
+#include <unistd.h>
 #include <time.h>
 #include "tracker.h"
 
@@ -29,9 +29,9 @@ typedef struct {
 } LineDelta;
 
 typedef struct {
-    int is_batch;            
-    int num_lines;           
-    LineDelta deltas[150];    
+    int is_batch;
+    int num_lines;
+    LineDelta deltas[150];
     int cursor_x;
     int current_line;
 } UndoBatch;
@@ -72,10 +72,9 @@ void save_undo_state_single(int line_idx) {
     // Safely copy the line content
     strncpy(undo_stack[undo_stack_top].deltas[0].original_text, buffer[line_idx], MAX_LINE_LEN - 1);
     undo_stack[undo_stack_top].deltas[0].original_text[MAX_LINE_LEN - 1] = '\0';
-    
+
     undo_stack[undo_stack_top].cursor_x = cursor_x;
     undo_stack[undo_stack_top].current_line = current_line;
-    is_modified = 1;
 }
 
 void save_undo_state_batch(int start_line, int count) {
@@ -91,9 +90,9 @@ void save_undo_state_batch(int start_line, int count) {
 
     undo_stack_top++;
     undo_stack[undo_stack_top].is_batch = 1;
-    
+
     // 2. USE actual_count HERE
-    undo_stack[undo_stack_top].num_lines = actual_count; 
+    undo_stack[undo_stack_top].num_lines = actual_count;
 
     // 3. USE actual_count IN THE LOOP
     for (int i = 0; i < actual_count; i++) {
@@ -104,7 +103,6 @@ void save_undo_state_batch(int start_line, int count) {
 
     undo_stack[undo_stack_top].cursor_x = cursor_x;
     undo_stack[undo_stack_top].current_line = current_line;
-    is_modified = 1;
 }
 
 void undo(void) {
@@ -114,19 +112,19 @@ void undo(void) {
     }
 
     UndoBatch *b = &undo_stack[undo_stack_top];
-    
+
     // If it was a batch action (like our multi-line paste or interactive deletes)
     if (b->is_batch) {
         // Clear old buffer positions beyond what we are restoring
         for (int i = b->deltas[0].line_index; i < MAX_LINES; i++) {
             buffer[i][0] = '\0';
         }
-        
+
         // Restore saved lines
         for (int i = 0; i < b->num_lines; i++) {
             strcpy(buffer[b->deltas[i].line_index], b->deltas[i].original_text);
         }
-        
+
         // Dynamically recalculate active line counts based on physical data strings left
         int new_count = 0;
         for (int i = 0; i < MAX_LINES; i++) {
@@ -139,7 +137,7 @@ void undo(void) {
             strcpy(buffer[b->deltas[i].line_index], b->deltas[i].original_text);
         }
     }
-    
+
     // Restore cursor positions cleanly
     current_line = b->current_line;
     cursor_x = b->cursor_x;
@@ -157,7 +155,7 @@ void load_file(const char *filename) {
     // 2. Check for Swap File
     char swp_filename[256];
     snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", filename);
-    
+
     const char *target_file = filename;
     FILE *swp_fp = fopen(swp_filename, "r");
     if (swp_fp) {
@@ -181,6 +179,12 @@ void load_file(const char *filename) {
         while (fgets(buffer[line_count], MAX_LINE_LEN, fp) && line_count < MAX_LINES) {
             buffer[line_count][strcspn(buffer[line_count], "\r\n")] = 0;
             line_count++;
+        }
+        if (line_count == MAX_LINES) {
+            char extra_check[2];
+            if (fgets(extra_check, sizeof(extra_check), fp) != NULL) {
+                snprintf(status_msg, sizeof(status_msg), "CRITICAL WARNING: File exceeds %d lines! Truncated to protect data.", MAX_LINES);
+            }
         }
         fclose(fp);
         strncpy(current_filename, filename, sizeof(current_filename) - 1);
@@ -208,8 +212,8 @@ void interactive_open() {
     noecho();
 
     mvprintw(LINES - 1, 0, "%s", prompt);
-    clrtoeol(); 
-    refresh();  
+    clrtoeol();
+    refresh();
 
     while (idx < (int)sizeof(filename) - 1) {
         int ch = getch();
@@ -278,11 +282,14 @@ void save_file() {
             return; // User hit enter without typing anything, cancel save
         }
     }
-
     // Now safely write out to current_filename (either loaded on start or typed above)
     FILE *fp = fopen(current_filename, "w");
     if (fp) {
         for (int i = 0; i < line_count; i++) {
+            int len = strlen(buffer[i]);
+            while (len > 0 && (buffer[i][len - 1] == ' ' || buffer[i][len - 1] == '\t')) {
+                buffer[i][--len] = '\0';
+            }
             fprintf(fp, "%s\n", buffer[i]);
         }
         fclose(fp);
@@ -308,7 +315,7 @@ void save_file() {
 void auto_save() {
     char swp_filename[256];
     snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", current_filename);
-    
+
     FILE *fp = fopen(swp_filename, "w");
     if (fp) {
         for (int i = 0; i < line_count; i++) {
@@ -322,7 +329,7 @@ void draw_screen() {
     // REMOVED clear(); to prevent flicker
 
     start_color();
-    init_pair(1, COLOR_YELLOW, COLOR_BLACK); 
+    init_pair(1, COLOR_YELLOW, COLOR_BLACK);
     init_pair(2, COLOR_RED, COLOR_BLACK);
     init_pair(3, COLOR_CYAN, COLOR_BLACK);
     init_pair(4, COLOR_MAGENTA, COLOR_BLACK);
@@ -345,12 +352,12 @@ void draw_screen() {
         mvaddch(1, x, ACS_HLINE);
     }
 
-    int max_displayable_lines = LINES - 4; 
-    int physical_row = 2; 
+    int max_displayable_lines = LINES - 4;
+    int physical_row = 2;
 
     for (int i = 0; i < max_displayable_lines; i++) {
         int file_line_index = scroll_y + i;
-        
+
         move(physical_row, 0);
         clrtoeol();
 
@@ -361,10 +368,10 @@ void draw_screen() {
 
         if (file_line_index == current_line) {
             attron(COLOR_PAIR(1));
-            mvprintw(physical_row, 0, "%3d ", file_line_index + 1); 
+            mvprintw(physical_row, 0, "%3d ", file_line_index + 1);
             attroff(COLOR_PAIR(1));
             attron(COLOR_PAIR(1) | A_BOLD);
-            mvaddch(physical_row, 4, ACS_DIAMOND); 
+            mvaddch(physical_row, 4, ACS_DIAMOND);
             attroff(COLOR_PAIR(1) | A_BOLD);
         } else {
             mvprintw(physical_row, 0, "%3d ", file_line_index + 1);
@@ -375,7 +382,7 @@ void draw_screen() {
         int len = strlen(line);
         int in_string = 0;
         int in_char = 0;
-        int available_width = COLS - 6; 
+        int available_width = COLS - 6;
         int current_phys_row = physical_row;
         int current_phys_col = 6;
 
@@ -409,7 +416,7 @@ void draw_screen() {
                 attron(COLOR_PAIR(5));
                 printw("%s", &line[j]);
                 attroff(COLOR_PAIR(5));
-                break; 
+                break;
             }
             if (line[j] == '\'' && !in_string) {
                 if (in_char) { printw("%c", line[j]); attroff(COLOR_PAIR(4)); in_char = 0; }
@@ -457,7 +464,7 @@ void draw_screen() {
 
     move(LINES - 2, 0);
     clrtoeol();
-    for (int x = 0; x < COLS; x++) mvaddch(LINES - 2, x, ACS_HLINE); 
+    for (int x = 0; x < COLS; x++) mvaddch(LINES - 2, x, ACS_HLINE);
 
     move(LINES - 1, 0);
     clrtoeol();
@@ -478,7 +485,7 @@ void draw_screen() {
             }
             mvprintw(LINES - 1, 0, "Lines Mod: %d | Chars Mod: %d | Total Chars: %d | Cur: %d/%d | (^? for Help)", modified_lines, modified_chars, total_chars, current_line + 1, cursor_x + 1);
         }
-    }    
+    }
 
     // --- ADD SOLID VERTICAL MARGIN LINE AT COLUMN 81 ---
     if (COLS > 81) {
@@ -492,7 +499,7 @@ void draw_screen() {
             }
         }
     }
-    
+
     int cursor_physical_row = 2;
     for (int i = scroll_y; i < current_line; i++) {
         int l_len = strlen(buffer[i]);
@@ -560,11 +567,11 @@ void find_text() {
         char lower_search[128];
 
         // Convert both strings to lowercase for comparison
-        for (int j = 0; buffer[i][j] && j < MAX_LINE_LEN - 1; j++) 
+        for (int j = 0; buffer[i][j] && j < MAX_LINE_LEN - 1; j++)
             lower_line[j] = tolower((unsigned char)buffer[i][j]);
         lower_line[strlen(buffer[i])] = '\0';
-        
-        for (int j = 0; search_str[j] && j < 127; j++) 
+
+        for (int j = 0; search_str[j] && j < 127; j++)
             lower_search[j] = tolower((unsigned char)search_str[j]);
         lower_search[strlen(search_str)] = '\0';
 
@@ -597,24 +604,24 @@ void find_text() {
         }
         if (scroll_y < 0) scroll_y = 0;
 
-        draw_screen(); 
-        snprintf(status_msg, sizeof(status_msg), 
-                 "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]", 
+        draw_screen();
+        snprintf(status_msg, sizeof(status_msg),
+                 "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]",
                  current_match_idx + 1, match_count);
-        draw_screen(); 
+        draw_screen();
 
         int ch = getch();
-        if (ch == 10 || ch == 13) { 
+        if (ch == 10 || ch == 13) {
             snprintf(status_msg, sizeof(status_msg), "Found match at line %d.", current_line + 1);
-            break; 
-        } 
-        else if (ch == 27) { 
+            break;
+        }
+        else if (ch == 27) {
             status_msg[0] = '\0';
-            break; 
-        } 
+            break;
+        }
         else if (ch == KEY_RIGHT || ch == KEY_DOWN) {
             current_match_idx = (current_match_idx + 1) % match_count;
-        } 
+        }
         else if (ch == KEY_LEFT || ch == KEY_UP) {
             current_match_idx = (current_match_idx - 1 + match_count) % match_count;
         }
@@ -627,7 +634,7 @@ void replace_text() {
     int idx = 0;
     search_str[0] = '\0';
     replace_str[0] = '\0';
-    
+
     noecho();
 
     // Prompt 1: Find text
@@ -683,7 +690,7 @@ void replace_text() {
     // 3. Collect Match Coordinates
     struct { int line; int col; } matches[500];
     int match_count = 0;
-    
+
     for (int i = 0; i < line_count; i++) {
         char *ptr = buffer[i];
         while ((ptr = strstr(ptr, search_str)) != NULL) {
@@ -705,7 +712,7 @@ void replace_text() {
 
     int current_idx = 0;
     int replaced_count = 0;
-    int force_all = 0; 
+    int force_all = 0;
 
     // 4. Interactive Replace Loop
     while (current_idx < match_count) {
@@ -721,8 +728,8 @@ void replace_text() {
 
         int choice = 'n';
         if (!force_all) {
-            snprintf(status_msg, sizeof(status_msg), 
-                     "Match %d of %d: Replace? (y: Yes | n: No | a: All | q: Quit/ESC)", 
+            snprintf(status_msg, sizeof(status_msg),
+                     "Match %d of %d: Replace? (y: Yes | n: No | a: All | q: Quit/ESC)",
                      current_idx + 1, match_count);
             draw_screen();
             choice = getch();
@@ -757,7 +764,7 @@ void replace_text() {
                     if (matches[j].line == line) {
                         matches[j].col += delta;
                     } else {
-                        break; 
+                        break;
                     }
                 }
             }
@@ -827,7 +834,7 @@ void goto_line() {
 
     int max_displayable_lines = LINES - 4;
     scroll_y = current_line - (max_displayable_lines / 2);
-    
+
     if (scroll_y < 0) scroll_y = 0;
     if (scroll_y > line_count - max_displayable_lines) {
         scroll_y = line_count - max_displayable_lines;
@@ -883,7 +890,7 @@ void delete_lines_interactive() {
     char to_delete[MAX_LINES];
     memset(to_delete, 0, sizeof(to_delete));
 
-    save_undo_state_batch(0, line_count); 
+    save_undo_state_batch(0, line_count);
 
     char *token = strtok(input, ",");
     while (token != NULL) {
@@ -914,10 +921,10 @@ void delete_lines_interactive() {
     for (int i = line_count - 1; i >= 0; i--) {
         if (to_delete[i]) {
             for (int j = i; j < line_count - 1; j++) {
-                strcpy(buffer[j], buffer[j + 1]); 
+                strcpy(buffer[j], buffer[j + 1]);
             }
-            buffer[line_count - 1][0] = '\0'; 
-            line_count--; 
+            buffer[line_count - 1][0] = '\0';
+            line_count--;
             deleted_count++;
 
             if (i <= current_line && current_line > 0) {
@@ -933,8 +940,8 @@ void delete_lines_interactive() {
         cursor_x = 0;
     }
 
-    int len = strlen(buffer[current_line]); 
-    if (cursor_x > len) cursor_x = len; 
+    int len = strlen(buffer[current_line]);
+    if (cursor_x > len) cursor_x = len;
 
     int max_displayable_lines = LINES - 4;
     if (scroll_y > line_count - max_displayable_lines) {
@@ -958,13 +965,13 @@ void show_help_window() {
 
     // 2. Create the window
     WINDOW *help_win = newwin(height, width, start_y, start_x);
-    
+
     // Allow the window to catch all keypad inputs seamlessly
     keypad(help_win, TRUE);
 
     // 3. Draw the thin ANSI/NCURSES box borders
     // Arguments: win, vline, hline
-    box(help_win, 0, 0); 
+    box(help_win, 0, 0);
 
     // 4. Render the command list content
     const char *header = "--- qi text editor help ---";
@@ -983,7 +990,7 @@ void show_help_window() {
     mvwprintw(help_win, 11, 4, "^B Jump to End of File");
     mvwprintw(help_win, 12, 4, "^X Toggle Insert/Overwrite Modes");
     mvwprintw(help_win, 13, 4, "^Q Quit Editor");
-    
+
     mvwprintw(help_win, 15, (width - 24) / 2, "Press any key to close");
 
     // 5. Refresh to show the popup overlay
@@ -1011,7 +1018,7 @@ int main(int argc, char *argv[]) {
 
     // --- FORCE DISABLE TERMINAL BRACKETED PASTE MODE ---
     // This stops modern terminals from wrapping your pastes in escape characters.
-    printf("\e[?2004l"); 
+    printf("\e[?2004l");
     fflush(stdout);
 
     // 2. Initialize ncurses completely
@@ -1033,6 +1040,29 @@ int main(int argc, char *argv[]) {
     // Check if a filename argument was provided
     if (argc > 1) {
         load_file(argv[1]);
+        if (argc > 2) {
+            // Check if the second argument begins with '+' or ':'
+            if (argv[2][0] == '+' || argv[2][0] == ':') {
+                // Convert the string numbers past the prefix into an integer
+                int target_line = atoi(&argv[2][1]);
+
+                // Ensure the target line falls inside your actual file bounds
+                if (target_line > 0 && target_line <= line_count) {
+                    current_line = target_line - 1;
+                    cursor_x = 0;
+
+                    // Dynamically position the screen viewport to center the line
+                    int max_displayable_lines = LINES - 4;
+                    scroll_y = current_line - (max_displayable_lines / 2);
+
+                    if (scroll_y < 0) scroll_y = 0;
+                    if (scroll_y > line_count - max_displayable_lines) {
+                        scroll_y = line_count - max_displayable_lines;
+                        if (scroll_y < 0) scroll_y = 0;
+                    }
+                }
+            }
+        }
     } else {
         // Default name if no argument is passed
         strcpy(current_filename, "untitled.txt");
@@ -1055,7 +1085,7 @@ int main(int argc, char *argv[]) {
         // If characters/newlines are hitting the loop under 4ms apart, it's a massive paste
         if (ms_since_last < 4.0 && ch != CTRL_KEY('u') && last_input_time != 0) {
             if (!paste_batch_active) {
-                // We just realized a fast paste sequence started! 
+                // We just realized a fast paste sequence started!
                 // Snapshot the editor state starting from the current line
                 save_undo_state_batch(current_line, line_count - current_line);
                 paste_batch_active = 1;
@@ -1074,12 +1104,12 @@ int main(int argc, char *argv[]) {
 
                 attron(COLOR_PAIR(2)); // --- TURN ON RED ---
                 printw("Unsaved changes! Quit anyway? (y/n): ");
-                attroff(COLOR_PAIR(2)); // --- TURN OFF RED ---                
+                attroff(COLOR_PAIR(2)); // --- TURN OFF RED ---
 
                 refresh();
                 int confirm = getch();
                 if (confirm == 'y' || confirm == 'Y') {
-                    break; 
+                    break;
                 } else {
                     continue; // Skip the rest of the loop and redraw the screen safely
                 }
@@ -1115,11 +1145,11 @@ int main(int argc, char *argv[]) {
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-                
+
                 // --- VISUAL SCROLLOFF: Calculate real visual row gap ---
                 int available_width = COLS - 6;
                 int visual_rows_above = 0;
-                
+
                 for (int i = scroll_y; i < current_line; i++) {
                     int l_len = strlen(buffer[i]);
                     int l_rows = (l_len / available_width) + 1;
@@ -1132,7 +1162,7 @@ int main(int argc, char *argv[]) {
                     // Slide the camera up by array elements until we clear the visual buffer zone
                     while (scroll_y > 0 && visual_rows_above < 3) {
                         scroll_y--;
-                        
+
                         // Recalculate visual row gap with updated scroll_y
                         visual_rows_above = 0;
                         for (int i = scroll_y; i < current_line; i++) {
@@ -1151,17 +1181,17 @@ int main(int argc, char *argv[]) {
         } else if (ch == KEY_DOWN) {
             if (current_line < line_count - 1) {
                 current_line++;
-                
+
                 int max_displayable_lines = LINES - 4;
                 int available_width = COLS - 6;
-                
+
                 // Calculate visual row position of current_line relative to scroll_y
                 int visual_row_index = 0;
                 for (int i = scroll_y; i <= current_line; i++) {
                     int l_len = strlen(buffer[i]);
                     int l_rows = (l_len / available_width) + 1;
                     if (l_len == 0) l_rows = 1;
-                    
+
                     if (i < current_line) {
                         visual_row_index += l_rows;
                     } else {
@@ -1187,7 +1217,7 @@ int main(int argc, char *argv[]) {
             if (cursor_x > 0) cursor_x--;
         } else if (ch == KEY_RIGHT) {
             if (cursor_x < (int)strlen(buffer[current_line])) cursor_x++;
-        } else if (ch == 393 || ch == 545 || ch == 260 || ch == 543) { 
+        } else if (ch == 393 || ch == 545 || ch == 260 || ch == 543) {
             // --- BACKUP / macOS WORD HOP LEFT (Option + Left Arrow) ---
             if (cursor_x > 0) {
                 while (cursor_x > 0 && isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
@@ -1195,7 +1225,7 @@ int main(int argc, char *argv[]) {
             }
             draw_screen();
             continue;
-        } else if (ch == 402 || ch == 560 || ch == 261 || ch == 544) { 
+        } else if (ch == 402 || ch == 560 || ch == 261 || ch == 544) {
             // --- BACKUP / macOS WORD HOP RIGHT (Option + Right Arrow) ---
             int len = strlen(buffer[current_line]);
             if (cursor_x < len) {
@@ -1207,15 +1237,15 @@ int main(int argc, char *argv[]) {
         } else if (ch == KEY_PPAGE) {
             // --- PAGE UP ---
             int max_displayable_lines = LINES - 4;
-            
+
             // Move cursor up by a full page
             current_line -= max_displayable_lines;
             if (current_line < 0) current_line = 0;
-            
+
             // Move the viewport camera up by the same distance
             scroll_y -= max_displayable_lines;
             if (scroll_y < 0) scroll_y = 0;
-            
+
             // Adjust cursor column safety on the new line
             int len = strlen(buffer[current_line]);
             if (cursor_x > len) cursor_x = len;
@@ -1223,18 +1253,18 @@ int main(int argc, char *argv[]) {
         } else if (ch == KEY_NPAGE) {
             // --- PAGE DOWN ---
             int max_displayable_lines = LINES - 4;
-            
+
             // Move cursor down by a full page
             current_line += max_displayable_lines;
             if (current_line >= line_count) current_line = line_count - 1;
-            
+
             // Move the viewport camera down, keeping it in bounds
             scroll_y += max_displayable_lines;
             if (scroll_y > line_count - max_displayable_lines) {
                 scroll_y = line_count - max_displayable_lines;
             }
             if (scroll_y < 0) scroll_y = 0;
-            
+
             // Adjust cursor column safety on the new line
             int len = strlen(buffer[current_line]);
             if (cursor_x > len) cursor_x = len;
@@ -1245,17 +1275,17 @@ int main(int argc, char *argv[]) {
                 cursor_x = 0;
             } else { // It's an Escape byte (27)
                 int next1 = getch();
-                
+
                 // --- macOS OPTION + ARROW SHORTCUTS ---
-                if (next1 == 'b') { 
+                if (next1 == 'b') {
                     // Option + Left Arrow (Hop Word Left)
                     if (cursor_x > 0) {
                         while (cursor_x > 0 && isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
                         while (cursor_x > 0 && !isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
                     }
                     continue;
-                } 
-                else if (next1 == 'f') { 
+                }
+                else if (next1 == 'f') {
                     // Option + Right Arrow (Hop Word Right)
                     int len = strlen(buffer[current_line]);
                     if (cursor_x < len) {
@@ -1264,14 +1294,14 @@ int main(int argc, char *argv[]) {
                     }
                     continue;
                 }
-                
+
                 // --- EXISTING EXTENDED KEY ESCAPES ---
                 int next2 = getch();
                 // Check if it's the sequence for Home: \033[1~ or \033[H
                 if (next1 == '[' && (next2 == '1' || next2 == 'H')) {
                     if (next2 == '1') getch(); // Swallow the trailing '~'
                     cursor_x = 0;
-                } 
+                }
                 // Check if it's the sequence for End: \033[4~ or \033[F
                 else if (next1 == '[' && (next2 == '4' || next2 == 'F')) {
                     if (next2 == '4') getch(); // Swallow the trailing '~'
@@ -1281,24 +1311,24 @@ int main(int argc, char *argv[]) {
                     ungetch(next1);
                 }
             }
-            
+
         } else if (ch == KEY_END || ch == 5) {
             // Handle End or Ctrl+E (\005)
-            cursor_x = (int)strlen(buffer[current_line]);         
+            cursor_x = (int)strlen(buffer[current_line]);
 
         } else if (ch == 9) {
             int len = strlen(buffer[current_line]);
             int is_makefile = (strstr(current_filename, "Makefile") != NULL);
             int tab_size = is_makefile ? 1 : 4;
-            
+
             if (len + tab_size < MAX_LINE_LEN) {
                 save_undo_state_single(current_line);
-                
+
                 // Force an insertion regardless of the global overwrite_mode state
-                memmove(&buffer[current_line][cursor_x + tab_size], 
-                        &buffer[current_line][cursor_x], 
+                memmove(&buffer[current_line][cursor_x + tab_size],
+                        &buffer[current_line][cursor_x],
                         len - cursor_x + 1);
-                
+
                 if (is_makefile) {
                     buffer[current_line][cursor_x] = '\t';
                     tracker_set_modified(current_line, cursor_x, 1);
@@ -1308,8 +1338,10 @@ int main(int argc, char *argv[]) {
                         tracker_set_modified(current_line, cursor_x + i, 1);
                     }
                 }
-                cursor_x += tab_size; 
+                cursor_x += tab_size;
                 // DO NOT add any extra braces or continue statements here
+                is_modified = 1;
+                mod_count++;
             }
 
         } else if (ch == 10 || ch == 13) {
@@ -1326,12 +1358,13 @@ int main(int argc, char *argv[]) {
                 current_line++;
                 cursor_x = 0;
                 line_count++;
+                is_modified = 1;
 
                 // --- VISUAL SCROLLOFF: Handle viewport updates for layout wrapping on Enter ---
                 int max_displayable_lines = LINES - 4;
                 int available_width = COLS - 6;
                 int visual_row_index = 0;
-                
+
                 for (int i = scroll_y; i < current_line; i++) {
                     int l_len = strlen(buffer[i]);
                     int l_rows = (l_len / available_width) + 1;
@@ -1355,11 +1388,12 @@ int main(int argc, char *argv[]) {
                 int len = strlen(buffer[current_line]);
                 memmove(&buffer[current_line][cursor_x - 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
                 cursor_x--;
+                is_modified = 1;
             } else if (current_line > 0) {
                 save_undo_state_single(current_line);
                 int target_line = current_line - 1;
                 int target_len = strlen(buffer[target_line]);
-                
+
                 if (target_len + strlen(buffer[current_line]) < MAX_LINE_LEN) {
                     strcat(buffer[target_line], buffer[current_line]);
                     for (int i = current_line; i < line_count - 1; i++) {
@@ -1369,6 +1403,7 @@ int main(int argc, char *argv[]) {
                     current_line--;
                     cursor_x = target_len;
                     line_count--;
+                    is_modified = 1;
                     if (current_line < scroll_y) {
                         scroll_y = current_line;
                     }
@@ -1378,38 +1413,40 @@ int main(int argc, char *argv[]) {
         } else if (ch == KEY_DC || ch == 330) {
             // Handle Forward Delete (Delete key)
             int len = strlen(buffer[current_line]);
-            
+
             // Case 1: Cursor is within the text, delete the character directly under it
             if (cursor_x < len) {
                 save_undo_state_single(current_line);
                 // Shift everything after the cursor left by 1 position
                 memmove(&buffer[current_line][cursor_x], &buffer[current_line][cursor_x + 1], len - cursor_x);
-            } 
+                is_modified = 1;
+            }
             // Case 2: Cursor is at the absolute end of the line, merge the NEXT line up
             else if (current_line < line_count - 1) {
                 int next_line = current_line + 1;
                 int next_len = strlen(buffer[next_line]);
-                
+
                 // Ensure merging won't overflow the maximum allowable line buffer width
                 if (len + next_len < MAX_LINE_LEN) {
                     save_undo_state_single(current_line);
-                    
+
                     // Append the contents of the next line directly onto this one
                     strcat(buffer[current_line], buffer[next_line]);
-                    
+
                     // Shift all subsequent lines up by 1 slot to fill the gap
                     for (int i = next_line; i < line_count - 1; i++) {
                         strcpy(buffer[i], buffer[i + 1]);
                     }
                     buffer[line_count - 1][0] = '\0'; // Clear the trailing duplicated row
                     line_count--;
+                    is_modified = 1;
                 }
             }
     } else if (ch >= 32 && ch <= 126) {
         // Handle typing a character
         int len = strlen(buffer[current_line]);
         if (cursor_x <= len) {
-           
+
                 if (!paste_batch_active) {
                     if (cursor_x == 0 || (buffer[current_line][cursor_x - 1] == ' ' && ch != ' ')) {
                         save_undo_state_single(current_line);
@@ -1430,7 +1467,7 @@ int main(int argc, char *argv[]) {
             }
             tracker_set_modified(current_line, cursor_x, 1);
             cursor_x++;
-
+            is_modified = 1;
             // --- ADD AUTO-SAVE TRIGGER ---
             mod_count++;
             if (mod_count >= 50) {
