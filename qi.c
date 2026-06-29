@@ -49,7 +49,7 @@ int current_line = 0;
 int cursor_x = 0;
 int scroll_y = 0;
 char current_filename[256] = "untitled.txt";
-char status_msg[256] = "";
+char status_msg[512] = "";
 int is_modified = 0;
 int line_modified[MAX_LINES] = {0};
 int mod_count = 0;
@@ -295,7 +295,7 @@ void save_file() {
         fclose(fp);
 
         // Remove swp file
-        char swp_filename[256];
+        char swp_filename[300];
         snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", current_filename);
         unlink(swp_filename); // Removes the swap file after a successful manual save
 
@@ -313,7 +313,7 @@ void save_file() {
 } // End save_file
 
 void auto_save() {
-    char swp_filename[256];
+    char swp_filename[300];
     snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", current_filename);
 
     FILE *fp = fopen(swp_filename, "w");
@@ -1099,7 +1099,7 @@ int main(int argc, char *argv[]) {
 
         if (ch == CTRL_KEY('q')) {
             if (is_modified) {
-                mvprintw(LINES - 1, 0, "");
+                move(LINES - 1, 0);
                 clrtoeol();
 
                 attron(COLOR_PAIR(2)); // --- TURN ON RED ---
@@ -1353,7 +1353,10 @@ int main(int argc, char *argv[]) {
                 for (int i = line_count; i > current_line + 1; i--) {
                     strcpy(buffer[i], buffer[i - 1]);
                 }
-                strcpy(buffer[current_line + 1], &buffer[current_line][cursor_x]);
+                //strcpy(buffer[current_line + 1], &buffer[current_line][cursor_x]);
+                memmove(&buffer[current_line][cursor_x],
+                    &buffer[current_line][cursor_x + 1],
+                    strlen(&buffer[current_line][cursor_x + 1]) + 1);
                 buffer[current_line][cursor_x] = '\0';
                 current_line++;
                 cursor_x = 0;
@@ -1395,7 +1398,9 @@ int main(int argc, char *argv[]) {
                 int target_len = strlen(buffer[target_line]);
 
                 if (target_len + strlen(buffer[current_line]) < MAX_LINE_LEN) {
-                    strcat(buffer[target_line], buffer[current_line]);
+                    //strcat(buffer[target_line], buffer[current_line]);
+                    //memmove(&buffer[target_line][target_len], buffer[current_line], current_len + 1);
+                    memmove(&buffer[target_line][target_len], buffer[current_line], strlen(buffer[current_line]) + 1);
                     for (int i = current_line; i < line_count - 1; i++) {
                         strcpy(buffer[i], buffer[i + 1]);
                     }
@@ -1431,7 +1436,8 @@ int main(int argc, char *argv[]) {
                     save_undo_state_single(current_line);
 
                     // Append the contents of the next line directly onto this one
-                    strcat(buffer[current_line], buffer[next_line]);
+                    //strcat(buffer[current_line], buffer[next_line]);
+                    memmove(&buffer[current_line][len], buffer[next_line], next_len + 1);
 
                     // Shift all subsequent lines up by 1 slot to fill the gap
                     for (int i = next_line; i < line_count - 1; i++) {
