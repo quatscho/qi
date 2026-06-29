@@ -1,7 +1,7 @@
 /* 
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.23 (2026)
+ * Version: 1.0.24 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state 
@@ -14,25 +14,33 @@
 #include <ncurses.h>
 #include <termios.h> 
 #include <unistd.h> 
+#include <time.h>
 #include "tracker.h"
 
 #define MAX_LINES 50000
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
-#define MAX_UNDO 50
-#define VERSION "1.0.23"
+#define MAX_UNDO 500
+#define VERSION "1.0.24"
 
 typedef struct {
-    char **buffer;
-    int line_count;
-    int current_line;
-    int cursor_x;
-    int scroll_y;
-    int is_modified;
-} UndoState;
+    int line_index;
+    char original_text[MAX_LINE_LEN];
+} LineDelta;
 
-UndoState undo_stack[MAX_UNDO];
-int undo_stack_top = -1; // -1 means stack is currently empty
+typedef struct {
+    int is_batch;            
+    int num_lines;           
+    LineDelta deltas[150];    
+    int cursor_x;
+    int current_line;
+} UndoBatch;
+
+UndoBatch undo_stack[MAX_UNDO];
+int undo_stack_top = -1;
+void save_undo_state_single(int line_idx);
+void save_undo_state_batch(int start_line, int count);
+void undo(void);
 
 // Global state
 char buffer[MAX_LINES][MAX_LINE_LEN];
@@ -46,100 +54,102 @@ int is_modified = 0;
 int line_modified[MAX_LINES] = {0};
 int mod_count = 0;
 int overwrite_mode = 0; // 0 = Insert, 1 = Overwrite
+clock_t last_char_time = 0;
+int in_paste_stream = 0;
 
-void save_undo_state() {
-    // If the stack is full, shift everything left and free the oldest state's memory safely
+void save_undo_state_single(int line_idx) {
     if (undo_stack_top >= MAX_UNDO - 1) {
-        if (undo_stack[0].buffer != NULL) {
-            for (int j = 0; j < undo_stack[0].line_count; j++) {
-                if (undo_stack[0].buffer[j] != NULL) {
-                    free(undo_stack[0].buffer[j]);
-                }
-            }
-            free(undo_stack[0].buffer);
-            undo_stack[0].buffer = NULL;
-        }
         for (int i = 0; i < MAX_UNDO - 1; i++) {
             undo_stack[i] = undo_stack[i + 1];
         }
-        // Explicitly clear out the old top position so it doesn't leave trailing garbage pointers
-        undo_stack[MAX_UNDO - 1].buffer = NULL;
         undo_stack_top--;
     }
 
     undo_stack_top++;
+    undo_stack[undo_stack_top].is_batch = 0;
+    undo_stack[undo_stack_top].num_lines = 1;
+    undo_stack[undo_stack_top].deltas[0].line_index = line_idx;
+    // Safely copy the line content
+    strncpy(undo_stack[undo_stack_top].deltas[0].original_text, buffer[line_idx], MAX_LINE_LEN - 1);
+    undo_stack[undo_stack_top].deltas[0].original_text[MAX_LINE_LEN - 1] = '\0';
     
-    // Clear out any old allocations in this slot before overwriting it
-    if (undo_stack[undo_stack_top].buffer != NULL) {
-        for (int j = 0; j < undo_stack[undo_stack_top].line_count; j++) {
-            if (undo_stack[undo_stack_top].buffer[j] != NULL) {
-                free(undo_stack[undo_stack_top].buffer[j]);
-            }
-        }
-        free(undo_stack[undo_stack_top].buffer);
-        undo_stack[undo_stack_top].buffer = NULL;
-    }
-
-    // Capture standard integers
-    undo_stack[undo_stack_top].line_count = line_count;
-    undo_stack[undo_stack_top].current_line = current_line;
     undo_stack[undo_stack_top].cursor_x = cursor_x;
-    undo_stack[undo_stack_top].scroll_y = scroll_y;
-    undo_stack[undo_stack_top].is_modified = is_modified;
+    undo_stack[undo_stack_top].current_line = current_line;
+}
 
-    // Dynamically allocate only the rows we actually need right now
-    undo_stack[undo_stack_top].buffer = malloc(line_count * sizeof(char *));
-    for (int i = 0; i < line_count; i++) {
-        undo_stack[undo_stack_top].buffer[i] = malloc(MAX_LINE_LEN * sizeof(char));
-        memcpy(undo_stack[undo_stack_top].buffer[i], buffer[i], MAX_LINE_LEN);
+void save_undo_state_batch(int start_line, int count) {
+    // 1. Cap the count to our struct limit
+    int actual_count = (count > 150) ? 150 : count;
+
+    if (undo_stack_top >= MAX_UNDO - 1) {
+        for (int i = 0; i < MAX_UNDO - 1; i++) {
+            undo_stack[i] = undo_stack[i + 1];
+        }
+        undo_stack_top--;
     }
 
-    is_modified = 1;
-} // End save_undo_state
+    undo_stack_top++;
+    undo_stack[undo_stack_top].is_batch = 1;
+    
+    // 2. USE actual_count HERE
+    undo_stack[undo_stack_top].num_lines = actual_count; 
 
-void undo() {
+    // 3. USE actual_count IN THE LOOP
+    for (int i = 0; i < actual_count; i++) {
+        undo_stack[undo_stack_top].deltas[i].line_index = start_line + i;
+        strncpy(undo_stack[undo_stack_top].deltas[i].original_text, buffer[start_line + i], MAX_LINE_LEN - 1);
+        undo_stack[undo_stack_top].deltas[i].original_text[MAX_LINE_LEN - 1] = '\0';
+    }
+
+    undo_stack[undo_stack_top].cursor_x = cursor_x;
+    undo_stack[undo_stack_top].current_line = current_line;
+}
+
+void undo(void) {
     if (undo_stack_top < 0) {
         snprintf(status_msg, sizeof(status_msg), "Nothing to undo!");
         return;
     }
 
-    // Restore standard properties
-    line_count = undo_stack[undo_stack_top].line_count;
-    current_line = undo_stack[undo_stack_top].current_line;
-    cursor_x = undo_stack[undo_stack_top].cursor_x;
-    scroll_y = undo_stack[undo_stack_top].scroll_y;
-    is_modified = undo_stack[undo_stack_top].is_modified;
-
-    // Restore the text rows from the dynamic snapshot back into the global matrix
-    for (int i = 0; i < line_count; i++) {
-        memcpy(buffer[i], undo_stack[undo_stack_top].buffer[i], MAX_LINE_LEN);
+    UndoBatch *b = &undo_stack[undo_stack_top];
+    
+    // If it was a batch action (like our multi-line paste or interactive deletes)
+    if (b->is_batch) {
+        // Clear old buffer positions beyond what we are restoring
+        for (int i = b->deltas[0].line_index; i < MAX_LINES; i++) {
+            buffer[i][0] = '\0';
+        }
+        
+        // Restore saved lines
+        for (int i = 0; i < b->num_lines; i++) {
+            strcpy(buffer[b->deltas[i].line_index], b->deltas[i].original_text);
+        }
+        
+        // Dynamically recalculate active line counts based on physical data strings left
+        int new_count = 0;
+        for (int i = 0; i < MAX_LINES; i++) {
+            if (buffer[i][0] != '\0' || i == 0) new_count = i + 1;
+        }
+        line_count = new_count;
+    } else {
+        // Standard single line change recovery
+        for (int i = 0; i < b->num_lines; i++) {
+            strcpy(buffer[b->deltas[i].line_index], b->deltas[i].original_text);
+        }
     }
+    
+    // Restore cursor positions cleanly
+    current_line = b->current_line;
+    cursor_x = b->cursor_x;
 
-    // Free the heap allocations for this popped state
-    for (int j = 0; j < line_count; j++) {
-        free(undo_stack[undo_stack_top].buffer[j]);
-    }
-    free(undo_stack[undo_stack_top].buffer);
-    undo_stack[undo_stack_top].buffer = NULL;
-
-    undo_stack_top--; 
-    snprintf(status_msg, sizeof(status_msg), "Undo!");
-} // End undo
+    undo_stack_top--;
+    snprintf(status_msg, sizeof(status_msg), "Undo performed.");
+}
 
 // Function to handle the "Open" command
 // 1. Silent file loader used by both main() and the menu
 void load_file(const char *filename) {
     // 1. Existing cleanup for undo_stack
-    while (undo_stack_top >= 0) {
-        if (undo_stack[undo_stack_top].buffer != NULL) {
-            for (int j = 0; j < undo_stack[undo_stack_top].line_count; j++) {
-                free(undo_stack[undo_stack_top].buffer[j]);
-            }
-            free(undo_stack[undo_stack_top].buffer);
-            undo_stack[undo_stack_top].buffer = NULL;
-        }
-        undo_stack_top--;
-    }
     undo_stack_top = -1;
 
     // 2. Check for Swap File
@@ -689,7 +699,7 @@ void replace_text() {
         return;
     }
 
-    save_undo_state();
+    save_undo_state_single(current_line);
 
     int current_idx = 0;
     int replaced_count = 0;
@@ -871,7 +881,7 @@ void delete_lines_interactive() {
     char to_delete[MAX_LINES];
     memset(to_delete, 0, sizeof(to_delete));
 
-    save_undo_state();
+    save_undo_state_batch(0, line_count); 
 
     char *token = strtok(input, ",");
     while (token != NULL) {
@@ -997,6 +1007,11 @@ int main(int argc, char *argv[]) {
         tcsetattr(STDIN_FILENO, TCSANOW, &tty);
     }
 
+    // --- FORCE DISABLE TERMINAL BRACKETED PASTE MODE ---
+    // This stops modern terminals from wrapping your pastes in escape characters.
+    printf("\e[?2004l"); 
+    fflush(stdout);
+
     // 2. Initialize ncurses completely
     initscr();
     set_escdelay(25);
@@ -1023,9 +1038,30 @@ int main(int argc, char *argv[]) {
         buffer[0][0] = '\0';
     }
 
+    #include <time.h> // Ensure time.h is included at top of file
+    clock_t last_input_time = 0;
+    int paste_batch_active = 0;
+
     while (1) {
         draw_screen();
         int ch = getch();
+
+        clock_t now = clock();
+        double ms_since_last = ((double)(now - last_input_time) / CLOCKS_PER_SEC) * 1000.0;
+        last_input_time = now;
+
+        // If characters/newlines are hitting the loop under 4ms apart, it's a massive paste
+        if (ms_since_last < 4.0 && ch != CTRL_KEY('u') && last_input_time != 0) {
+            if (!paste_batch_active) {
+                // We just realized a fast paste sequence started! 
+                // Snapshot the editor state starting from the current line
+                save_undo_state_batch(current_line, line_count - current_line);
+                paste_batch_active = 1;
+            }
+        } else {
+            // Stream slowed down; paste has finished
+            paste_batch_active = 0;
+        }
 
         status_msg[0] = '\0';
 
@@ -1254,7 +1290,7 @@ int main(int argc, char *argv[]) {
             int tab_size = is_makefile ? 1 : 4;
             
             if (len + tab_size < MAX_LINE_LEN) {
-                save_undo_state();
+                save_undo_state_single(current_line);
                 
                 // Force an insertion regardless of the global overwrite_mode state
                 memmove(&buffer[current_line][cursor_x + tab_size], 
@@ -1277,7 +1313,9 @@ int main(int argc, char *argv[]) {
         } else if (ch == 10 || ch == 13) {
             // Handle Enter Key
             if (line_count < MAX_LINES) {
-                save_undo_state();
+                if (!paste_batch_active) {
+                    save_undo_state_single(current_line);
+                }
                 for (int i = line_count; i > current_line + 1; i--) {
                     strcpy(buffer[i], buffer[i - 1]);
                 }
@@ -1311,12 +1349,12 @@ int main(int argc, char *argv[]) {
         } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             // Handle Backspace
             if (cursor_x > 0) {
-                save_undo_state();
+                save_undo_state_single(current_line);
                 int len = strlen(buffer[current_line]);
                 memmove(&buffer[current_line][cursor_x - 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
                 cursor_x--;
             } else if (current_line > 0) {
-                save_undo_state();
+                save_undo_state_single(current_line);
                 int target_line = current_line - 1;
                 int target_len = strlen(buffer[target_line]);
                 
@@ -1341,7 +1379,7 @@ int main(int argc, char *argv[]) {
             
             // Case 1: Cursor is within the text, delete the character directly under it
             if (cursor_x < len) {
-                save_undo_state();
+                save_undo_state_single(current_line);
                 // Shift everything after the cursor left by 1 position
                 memmove(&buffer[current_line][cursor_x], &buffer[current_line][cursor_x + 1], len - cursor_x);
             } 
@@ -1352,7 +1390,7 @@ int main(int argc, char *argv[]) {
                 
                 // Ensure merging won't overflow the maximum allowable line buffer width
                 if (len + next_len < MAX_LINE_LEN) {
-                    save_undo_state();
+                    save_undo_state_single(current_line);
                     
                     // Append the contents of the next line directly onto this one
                     strcat(buffer[current_line], buffer[next_line]);
@@ -1365,52 +1403,42 @@ int main(int argc, char *argv[]) {
                     line_count--;
                 }
             }
-
-            } else if (ch >= 32 && ch <= 126) {
-            // Handle typing a character
-            int len = strlen(buffer[current_line]);
-            if (cursor_x <= len) {
-                save_undo_state();
-
-                // Only take an undo snapshot when starting a new word or at line start
-                if (cursor_x == 0 || (buffer[current_line][cursor_x - 1] == ' ' && ch != ' ')) {
-                    save_undo_state();
-                }
-
-                if (overwrite_mode && cursor_x < len) {
-                // Overwrite mode: just replace the character
-                    buffer[current_line][cursor_x] = (char)ch;
-                } else {
-                    // Insert mode (or at end of line): shift characters right
-                    if (len + 1 < MAX_LINE_LEN) {
-                        memmove(&buffer[current_line][cursor_x + 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
-                        buffer[current_line][cursor_x] = (char)ch;
+    } else if (ch >= 32 && ch <= 126) {
+        // Handle typing a character
+        int len = strlen(buffer[current_line]);
+        if (cursor_x <= len) {
+           
+                if (!paste_batch_active) {
+                    if (cursor_x == 0 || (buffer[current_line][cursor_x - 1] == ' ' && ch != ' ')) {
+                        save_undo_state_single(current_line);
+                    } else if (mod_count == 0 || cursor_x % 10 == 0) {
+                        save_undo_state_single(current_line);
                     }
                 }
-                tracker_set_modified(current_line, cursor_x, 1);
-                cursor_x++;
 
-
-                // --- ADD AUTO-SAVE TRIGGER ---
-                mod_count++;
-                if (mod_count >= 50) {
-                    auto_save();
-                    mod_count = 0;
+            if (overwrite_mode && cursor_x < len) {
+                // Overwrite mode: just replace the character
+                buffer[current_line][cursor_x] = (char)ch;
+            } else {
+                // Insert mode (or at end of line): shift characters right
+                if (len + 1 < MAX_LINE_LEN) {
+                    memmove(&buffer[current_line][cursor_x + 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
+                    buffer[current_line][cursor_x] = (char)ch;
                 }
             }
-        }
-	} // <--- Closes the while(1) loop
+            tracker_set_modified(current_line, cursor_x, 1);
+            cursor_x++;
 
-    // --- CLEAN UP REMAINING ALLOCATIONS BEFORE EXIT ---
-    while (undo_stack_top >= 0) {
-        if (undo_stack[undo_stack_top].buffer != NULL) {
-            for (int j = 0; j < undo_stack[undo_stack_top].line_count; j++) {
-                free(undo_stack[undo_stack_top].buffer[j]);
+            // --- ADD AUTO-SAVE TRIGGER ---
+            mod_count++;
+            if (mod_count >= 50) {
+                auto_save();
+                mod_count = 0;
             }
-            free(undo_stack[undo_stack_top].buffer);
         }
-        undo_stack_top--;
     }
+	} // <--- Closes the while(1) loop
+    undo_stack_top = -1;
 
     endwin();
     return 0;
