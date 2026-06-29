@@ -75,6 +75,7 @@ void save_undo_state_single(int line_idx) {
     
     undo_stack[undo_stack_top].cursor_x = cursor_x;
     undo_stack[undo_stack_top].current_line = current_line;
+    is_modified = 1;
 }
 
 void save_undo_state_batch(int start_line, int count) {
@@ -103,6 +104,7 @@ void save_undo_state_batch(int start_line, int count) {
 
     undo_stack[undo_stack_top].cursor_x = cursor_x;
     undo_stack[undo_stack_top].current_line = current_line;
+    is_modified = 1;
 }
 
 void undo(void) {
