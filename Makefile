@@ -3,7 +3,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O2
 LIBS = -lncurses
 TARGET = qi
-SRCS = qi.c tracker.c
+SRCS = qi.c tracker.c syntax.c
 INSTALL_DIR = $(HOME)/bin
 
 # --- AUTOMATIC HOMEBREW PATH DISCOVERY ---

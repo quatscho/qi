@@ -1,11 +1,11 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.1 (2026)
+ * Version: 1.1.2 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
- * change tracking, and basic C syntax highlighting.
+ * change tracking, and multi-language syntax highlighting.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,11 +16,12 @@
 #include <unistd.h>
 #include <time.h>
 #include "tracker.h"
+#include "syntax.h"
 
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.1"
+#define VERSION "1.1.2"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -219,6 +220,8 @@ void load_file(const char *filename) {
         line_count = 1;
         is_modified = 0;
     }
+    syntax_set_file(current_filename);
+    syntax_scan(lines, line_count);
 }
 
 void interactive_open() {
@@ -344,28 +347,21 @@ void draw_screen() {
 
         char *line = lines[file_line_index];
         int len = strlen(line);
-        int in_string = 0;
-        int in_char = 0;
         int current_phys_row = physical_row;
         int current_phys_col = 6;
 
         move(current_phys_row, current_phys_col);
 
-        int leading_space = 0;
-        while (leading_space < len && (line[leading_space] == ' ' || line[leading_space] == '\t')) {
-            printw("%c", line[leading_space]);
-            current_phys_col++;
-            if (current_phys_col >= wrap_col) {
-                current_phys_row++; current_phys_col = 6;
-                if (current_phys_row < 2 + max_displayable_lines) {
-                    move(current_phys_row, current_phys_col);
-                    clrtoeol();
-                }
-            }
-            leading_space++;
-        }
+        /* Get syntax spans for this line */
+        Span spans[MAX_SPANS];
+        int nspans = syntax_spans(file_line_index, line, spans);
 
-        for (int j = leading_space; j < len; j++) {
+        /* Colour-pair lookup: TOK -> ncurses pair */
+        static const int tok_pair[] = { 0, 2, 4, 5, 3 };
+
+        /* Render character by character, applying span colours */
+        int span_idx = 0;
+        for (int j = 0; j < len; j++) {
             if (current_phys_col >= wrap_col) {
                 current_phys_row++; current_phys_col = 6;
                 if (current_phys_row < 2 + max_displayable_lines) {
@@ -373,56 +369,16 @@ void draw_screen() {
                     clrtoeol();
                 } else break;
             }
-            if (j == leading_space && line[j] == '#') {
-                attron(COLOR_PAIR(3)); printw("%s", &line[j]); attroff(COLOR_PAIR(3)); break;
-            }
-            if (!in_string && !in_char && line[j] == '/' && line[j+1] == '/') {
-                attron(COLOR_PAIR(5)); printw("%s", &line[j]); attroff(COLOR_PAIR(5)); break;
-            }
-            if (line[j] == '\'' && !in_string) {
-                if (in_char) { printw("%c", line[j]); attroff(COLOR_PAIR(4)); in_char = 0; }
-                else { attron(COLOR_PAIR(4)); printw("%c", line[j]); in_char = 1; }
-                current_phys_col++; continue;
-            }
-            if (in_char) { printw("%c", line[j]); current_phys_col++; continue; }
-            if (line[j] == '"' && !in_char) {
-                if (in_string) { printw("%c", line[j]); attroff(COLOR_PAIR(4)); in_string = 0; }
-                else { attron(COLOR_PAIR(4)); printw("%c", line[j]); in_string = 1; }
-                current_phys_col++; continue;
-            }
-            if (in_string) { printw("%c", line[j]); current_phys_col++; continue; }
-            if (j == 0 || (!isalnum((unsigned char)line[j-1]) && line[j-1] != '_')) {
-                const char *keywords[] = {"if","else","while","for","return","break",
-                    "continue","switch","case","default","int","char","void","struct",
-                    "typedef","double","float","long","short","unsigned","static",
-                    "const","extern","sizeof"};
-                int matched = 0;
-                for (int k = 0; k < 24; k++) {
-                    int kw_len = strlen(keywords[k]);
-                    if (strncmp(&line[j], keywords[k], kw_len) == 0 &&
-                        !isalnum((unsigned char)line[j + kw_len]) &&
-                        line[j + kw_len] != '_') {
-                        attron(COLOR_PAIR(2));
-                        for (int m = 0; m < kw_len; m++) {
-                            if (current_phys_col >= wrap_col) {
-                                current_phys_row++; current_phys_col = 6;
-                                if (current_phys_row < 2 + max_displayable_lines) {
-                                    move(current_phys_row, current_phys_col);
-                                    clrtoeol();
-                                } else break;
-                            }
-                            printw("%c", line[j + m]);
-                            current_phys_col++;
-                        }
-                        attroff(COLOR_PAIR(2));
-                        j += kw_len - 1;
-                        matched = 1;
-                        break;
-                    }
-                }
-                if (matched) continue;
-            }
+            /* Advance past expired spans */
+            while (span_idx < nspans && spans[span_idx].end <= j)
+                span_idx++;
+            /* Apply colour if inside an active span */
+            int pair = 0;
+            if (span_idx < nspans && j >= spans[span_idx].start && j < spans[span_idx].end)
+                pair = tok_pair[spans[span_idx].type];
+            if (pair) attron(COLOR_PAIR(pair));
             printw("%c", line[j]);
+            if (pair) attroff(COLOR_PAIR(pair));
             current_phys_col++;
         }
         physical_row = current_phys_row + 1;
