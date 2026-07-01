@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.17 (2026)
+ * Version: 1.1.18 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.17"
+#define VERSION "1.1.18"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1043,9 +1043,9 @@ void show_help_window() {
     };
     int total = (int)(sizeof(entries) / sizeof(entries[0]));
 
-    int win_h = 20, win_w = 46;
+    int win_h = 22, win_w = 46;
     if (win_h > LINES - 2) win_h = LINES - 2;
-    int inner_h = win_h - 5; /* rows available for scrolling content */
+    int inner_h = win_h - 6; /* rows available for scrolling content (2 borders + 4 footer rows) */
     int start_y = (LINES - win_h) / 2;
     int start_x = (COLS  - win_w) / 2;
     WINDOW *hw = newwin(win_h, win_w, start_y, start_x);
@@ -1055,9 +1055,19 @@ void show_help_window() {
     for (;;) {
         werase(hw);
         box(hw, 0, 0);
-        wattron(hw, COLOR_PAIR(1) | A_BOLD);
-        mvwprintw(hw, 0, (win_w - 10) / 2, " qi v%s ", VERSION);
-        wattroff(hw, COLOR_PAIR(1) | A_BOLD);
+
+        /* Title: ─────┤ qi vX.X.X ├───── on top border row */
+        {
+            char title[32];
+            snprintf(title, sizeof(title), " qi v%s ", VERSION);
+            int tlen = (int)strlen(title);
+            int tx = (win_w - tlen) / 2;
+            mvwaddch(hw, 0, tx - 1,    ACS_RTEE);
+            mvwaddch(hw, 0, tx + tlen, ACS_LTEE);
+            wattron(hw, COLOR_PAIR(1) | A_BOLD);
+            mvwprintw(hw, 0, tx, "%s", title);
+            wattroff(hw, COLOR_PAIR(1) | A_BOLD);
+        }
 
         /* Render visible entries */
         int row = 1;
@@ -1084,18 +1094,26 @@ void show_help_window() {
         if (scroll + inner_h < total)
             mvwprintw(hw, inner_h, win_w - 4, " v ");
 
-        /* Footer */
-        for (int x = 1; x < win_w - 1; x++) mvwaddch(hw, win_h - 4, x, ACS_HLINE);
+        /* Footer: separator, scroll hint, close hint — all above the bottom bump row */
+        for (int x = 1; x < win_w - 1; x++) mvwaddch(hw, win_h - 5, x, ACS_HLINE);
         wattron(hw, A_DIM);
-        mvwprintw(hw, win_h - 3, 2, "Arrow keys to scroll");
+        mvwprintw(hw, win_h - 4, 2, "Arrow keys to scroll");
         wattroff(hw, A_DIM);
         wattron(hw, COLOR_PAIR(1));
-        mvwprintw(hw, win_h - 2, 2, "Press any key to close...");
+        mvwprintw(hw, win_h - 3, 2, "Press any key to close...");
         wattroff(hw, COLOR_PAIR(1));
-        /* Copyright centred on last inner row */
-        char copy[48];
-        snprintf(copy, sizeof(copy), "(c) 2026 Christopher Camacho");
-        mvwprintw(hw, win_h - 1, (win_w - (int)strlen(copy)) / 2, "%s", copy);
+        /* Copyright: ─────┤ (c) 2026 ... ├───── on bottom border row */
+        {
+            char copy[48];
+            snprintf(copy, sizeof(copy), " (c) 2026 Christopher Camacho ");
+            int clen = (int)strlen(copy);
+            int cx = (win_w - clen) / 2;
+            mvwaddch(hw, win_h - 1, cx - 1,    ACS_RTEE);
+            mvwaddch(hw, win_h - 1, cx + clen, ACS_LTEE);
+            wattron(hw, A_DIM);
+            mvwprintw(hw, win_h - 1, cx, "%s", copy);
+            wattroff(hw, A_DIM);
+        }
 
         wrefresh(hw);
 
