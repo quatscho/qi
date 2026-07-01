@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.19 (2026)
+ * Version: 1.1.20 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.19"
+#define VERSION "1.1.20"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1493,7 +1493,7 @@ int main(int argc, char *argv[]) {
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;} 
+                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;}
                 int available_width = COLS - 1 - (gutter_visible ? (gd_u + 3) : 0);
                 int visual_rows_above = 0;
                 for (int i = scroll_y; i < current_line; i++) {
