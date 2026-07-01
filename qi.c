@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.18 (2026)
+ * Version: 1.1.19 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -15,13 +15,15 @@
 #include <termios.h>
 #include <unistd.h>
 #include <time.h>
+#include <signal.h>
+#include <sys/stat.h>
 #include "tracker.h"
 #include "syntax.h"
 
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.18"
+#define VERSION "1.1.19"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -82,6 +84,17 @@ int mod_count = 0;
 int overwrite_mode = 0;
 clock_t last_char_time = 0;
 int in_paste_stream = 0;
+
+/* mtime of the file as last loaded/saved; 0 = untitled or unknown */
+static time_t file_mtime = 0;
+
+/* Set by SIGTERM/SIGHUP handler — checked in main loop */
+static volatile sig_atomic_t got_fatal_signal = 0;
+
+static void fatal_signal_handler(int sig) {
+    (void)sig;
+    got_fatal_signal = 1;
+}
 
 /* Bracket match highlight: -1 means no active match */
 int match_line = -1;
@@ -415,6 +428,11 @@ void load_file(const char *filename) {
         line_count = 1;
         is_modified = 0;
     }
+    /* Record mtime so we can detect external changes */
+    {
+        struct stat st;
+        file_mtime = (stat(current_filename, &st) == 0) ? st.st_mtime : 0;
+    }
     syntax_set_file(current_filename);
     syntax_scan(lines, line_count);
 }
@@ -496,6 +514,11 @@ void save_file() {
         unlink(swp_filename);
         is_modified = 0;
         tracker_clear();
+        /* Update mtime after save so we don't falsely warn about our own write */
+        {
+            struct stat st;
+            file_mtime = (stat(current_filename, &st) == 0) ? st.st_mtime : 0;
+        }
         snprintf(status_msg, sizeof(status_msg), "Saved successfully to '%s'!", current_filename);
     } else {
         mvprintw(LINES - 1, 0, "Error: Could not save file! Press any key...");
@@ -1151,6 +1174,10 @@ int main(int argc, char *argv[]) {
 #endif
     mousemask(BUTTON1_PRESSED | BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
 
+    /* Install signal handlers for graceful shutdown */
+    signal(SIGTERM, fatal_signal_handler);
+    signal(SIGHUP,  fatal_signal_handler);
+
     /* Initialise tracker with a modest hint; it only uses 1 byte per line */
     tracker_init(1024, 1);
 
@@ -1200,6 +1227,31 @@ int main(int argc, char *argv[]) {
         }
 
         status_msg[0] = '\0';
+
+        /* Handle SIGTERM / SIGHUP: save if modified, then exit */
+        if (got_fatal_signal) {
+            if (is_modified) save_file();
+            break;
+        }
+
+        /* External file modification check (every draw cycle, lightweight) */
+        if (file_mtime != 0 && strcmp(current_filename, "untitled.txt") != 0) {
+            struct stat st;
+            if (stat(current_filename, &st) == 0 && st.st_mtime != file_mtime) {
+                file_mtime = st.st_mtime;  /* update so we only warn once */
+                move(LINES - 1, 0); clrtoeol();
+                attron(COLOR_PAIR(2));
+                printw("File changed on disk! Reload? (y/n): ");
+                attroff(COLOR_PAIR(2));
+                refresh();
+                int ans = getch();
+                if (ans == 'y' || ans == 'Y') {
+                    load_file(current_filename);
+                    snprintf(status_msg, sizeof(status_msg), "Reloaded '%s' from disk.", current_filename);
+                }
+                continue;
+            }
+        }
 
         if (ch == CTRL_KEY('q')) {
             if (is_modified) {
@@ -1363,7 +1415,7 @@ int main(int argc, char *argv[]) {
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;} 
+                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;}
                 int available_width = COLS - 1 - (gd_u + 3);
                 int visual_rows_above = 0;
                 for (int i = scroll_y; i < current_line; i++) {
