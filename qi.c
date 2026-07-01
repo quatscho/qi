@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.3 (2026)
+ * Version: 1.1.5 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.3"
+#define VERSION "1.1.5"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -71,26 +71,6 @@ static void remove_line_at(int i) {
     line_count--;
 }
 
-/* ---------- undo ---------- */
-typedef struct {
-    int line_index;
-    char original_text[MAX_LINE_LEN];
-} LineDelta;
-
-typedef struct {
-    int is_batch;
-    int num_lines;
-    LineDelta deltas[150];
-    int cursor_x;
-    int current_line;
-} UndoBatch;
-
-UndoBatch undo_stack[MAX_UNDO];
-int undo_stack_top = -1;
-void save_undo_state_single(int line_idx);
-void save_undo_state_batch(int start_line, int count);
-void undo(void);
-
 /* ---------- global state ---------- */
 int current_line = 0;
 int cursor_x = 0;
@@ -107,71 +87,334 @@ int in_paste_stream = 0;
 int match_line = -1;
 int match_col  = -1;
 
-void save_undo_state_single(int line_idx) {
-    if (undo_stack_top >= MAX_UNDO - 1) {
-        for (int i = 0; i < MAX_UNDO - 1; i++)
-            undo_stack[i] = undo_stack[i + 1];
-        undo_stack_top--;
+/* ---------- undo / redo ----------
+ *
+ * Operations recorded:
+ *   OP_CHAR_INS  — one character inserted at (line, col)
+ *   OP_CHAR_DEL  — one character deleted from (line, col)
+ *   OP_LINE_SPLIT — line split at (line, col): lines[line] truncated, new line inserted after
+ *   OP_LINE_JOIN  — lines[line] and lines[line+1] joined; join_col is where the join happened
+ *   OP_BULK       — arbitrary multi-line snapshot (replace-all, delete-lines, paste)
+ *
+ * The ring buffer holds up to MAX_UNDO records.  Undo pops from the undo
+ * head; the inverse is pushed onto the redo stack.  Any new edit clears redo.
+ */
+typedef enum {
+    OP_CHAR_INS,
+    OP_CHAR_DEL,
+    OP_LINE_SPLIT,
+    OP_LINE_JOIN,
+    OP_BULK,
+} OpType;
+
+typedef struct {
+    OpType type;
+    int    line;        /* line index at time of operation        */
+    int    col;         /* column index (char ops and split/join) */
+    char   ch;          /* character (OP_CHAR_INS / OP_CHAR_DEL) */
+    /* OP_LINE_JOIN: text of the line that was removed (lines[line+1]) */
+    /* OP_BULK: snapshot of all lines from bulk_start..bulk_start+bulk_count-1 */
+    char **bulk_lines;  /* heap-allocated array of heap strings   */
+    int    bulk_start;
+    int    bulk_count;
+    int    bulk_total;  /* total line_count at snapshot time      */
+    /* cursor state before the operation */
+    int    saved_line;
+    int    saved_col;
+} UndoOp;
+
+#define UNDO_CAP MAX_UNDO
+
+static UndoOp *undo_buf = NULL;   /* ring buffer, allocated in main()  */
+static int undo_head = 0;         /* index of oldest entry             */
+static int undo_count = 0;        /* number of valid entries           */
+
+static UndoOp *redo_buf = NULL;   /* linear stack (not ring)           */
+static int redo_top = -1;
+
+void save_undo_state_single(int line_idx);  /* kept for call-site compat */
+void save_undo_state_batch(int start_line, int count);
+void undo(void);
+void redo_op(void);
+
+/* Free heap strings inside an op (bulk only). */
+static void free_op(UndoOp *op) {
+    if ((op->type == OP_BULK || op->type == OP_LINE_JOIN) && op->bulk_lines) {
+        for (int i = 0; i < op->bulk_count; i++) free(op->bulk_lines[i]);
+        free(op->bulk_lines);
+        op->bulk_lines = NULL;
     }
-    undo_stack_top++;
-    undo_stack[undo_stack_top].is_batch = 0;
-    undo_stack[undo_stack_top].num_lines = 1;
-    undo_stack[undo_stack_top].deltas[0].line_index = line_idx;
-    strncpy(undo_stack[undo_stack_top].deltas[0].original_text,
-            lines[line_idx], MAX_LINE_LEN - 1);
-    undo_stack[undo_stack_top].deltas[0].original_text[MAX_LINE_LEN - 1] = '\0';
-    undo_stack[undo_stack_top].cursor_x = cursor_x;
-    undo_stack[undo_stack_top].current_line = current_line;
 }
 
-void save_undo_state_batch(int start_line, int count) {
-    int actual_count = (count > 150) ? 150 : count;
-    if (undo_stack_top >= MAX_UNDO - 1) {
-        for (int i = 0; i < MAX_UNDO - 1; i++)
-            undo_stack[i] = undo_stack[i + 1];
-        undo_stack_top--;
+/* Push op onto the undo ring, evicting the oldest entry if full. */
+static void push_undo(UndoOp *op) {
+    /* Clear redo stack on any new edit */
+    for (int i = 0; i <= redo_top; i++) free_op(&redo_buf[i]);
+    redo_top = -1;
+
+    if (undo_count == UNDO_CAP) {
+        /* Evict oldest */
+        free_op(&undo_buf[undo_head]);
+        undo_head = (undo_head + 1) % UNDO_CAP;
+        undo_count--;
     }
-    undo_stack_top++;
-    undo_stack[undo_stack_top].is_batch = 1;
-    undo_stack[undo_stack_top].num_lines = actual_count;
-    for (int i = 0; i < actual_count; i++) {
-        undo_stack[undo_stack_top].deltas[i].line_index = start_line + i;
-        strncpy(undo_stack[undo_stack_top].deltas[i].original_text,
-                lines[start_line + i], MAX_LINE_LEN - 1);
-        undo_stack[undo_stack_top].deltas[i].original_text[MAX_LINE_LEN - 1] = '\0';
-    }
-    undo_stack[undo_stack_top].cursor_x = cursor_x;
-    undo_stack[undo_stack_top].current_line = current_line;
+    int slot = (undo_head + undo_count) % UNDO_CAP;
+    undo_buf[slot] = *op;
+    undo_count++;
 }
+
+/* Record a single-character insertion. */
+static void record_char_ins(int line, int col, char ch) {
+    UndoOp op = {0};
+    op.type = OP_CHAR_INS;
+    op.line = line; op.col = col; op.ch = ch;
+    op.saved_line = current_line; op.saved_col = cursor_x;
+    push_undo(&op);
+}
+
+/* Record a single-character deletion. */
+static void record_char_del(int line, int col, char ch) {
+    UndoOp op = {0};
+    op.type = OP_CHAR_DEL;
+    op.line = line; op.col = col; op.ch = ch;
+    op.saved_line = current_line; op.saved_col = cursor_x;
+    push_undo(&op);
+}
+
+/* Record a line split: lines[line] was truncated at col, new line inserted after. */
+static void record_line_split(int line, int col) {
+    UndoOp op = {0};
+    op.type = OP_LINE_SPLIT;
+    op.line = line; op.col = col;
+    op.saved_line = current_line; op.saved_col = cursor_x;
+    push_undo(&op);
+}
+
+/* Record a line join: lines[line] and lines[line+1] were merged.
+ * tail is the text that was in lines[line+1] before the join. */
+static void record_line_join(int line, int col, const char *tail) {
+    UndoOp op = {0};
+    op.type = OP_LINE_JOIN;
+    op.line = line; op.col = col;
+    op.bulk_lines = malloc(sizeof(char *));
+    if (op.bulk_lines) { op.bulk_lines[0] = xstrdup(tail); op.bulk_count = 1; }
+    op.saved_line = current_line; op.saved_col = cursor_x;
+    push_undo(&op);
+}
+
+/* Record a bulk snapshot of lines[start..start+count-1]. */
+static void record_bulk(int start, int count) {
+    if (count <= 0) return;
+    UndoOp op = {0};
+    op.type = OP_BULK;
+    op.bulk_start = start;
+    op.bulk_count = count;
+    op.bulk_total = line_count;
+    op.bulk_lines = malloc(count * sizeof(char *));
+    if (!op.bulk_lines) return;
+    for (int i = 0; i < count; i++)
+        op.bulk_lines[i] = xstrdup(lines[start + i]);
+    op.saved_line = current_line; op.saved_col = cursor_x;
+    push_undo(&op);
+}
+
+/* Compatibility wrappers used by replace_text and delete_lines_interactive. */
+void save_undo_state_single(int line_idx) { record_bulk(line_idx, 1); }
+void save_undo_state_batch(int start_line, int count) { record_bulk(start_line, count); }
 
 void undo(void) {
-    if (undo_stack_top < 0) {
-        snprintf(status_msg, sizeof(status_msg), "Nothing to undo!");
-        return;
-    }
-    UndoBatch *b = &undo_stack[undo_stack_top];
-    if (b->is_batch) {
-        /* Restore saved lines; truncate file to the first saved index */
-        int first = b->deltas[0].line_index;
-        while (line_count > first) remove_line_at(line_count - 1);
-        for (int i = 0; i < b->num_lines; i++) {
-            if (!ensure_capacity(line_count + 1)) break;
-            lines[line_count] = xstrdup(b->deltas[i].original_text);
+    if (undo_count == 0) { snprintf(status_msg, sizeof(status_msg), "Nothing to undo!"); return; }
+
+    int slot = (undo_head + undo_count - 1) % UNDO_CAP;
+    UndoOp *op = &undo_buf[slot];
+    UndoOp inv = {0};
+    inv.saved_line = op->saved_line;
+    inv.saved_col  = op->saved_col;
+
+    switch (op->type) {
+    case OP_CHAR_INS:
+        /* Undo insert: delete the character */
+        if (op->line < line_count) {
+            int len = (int)strlen(lines[op->line]);
+            if (op->col < len)
+                memmove(lines[op->line] + op->col,
+                        lines[op->line] + op->col + 1,
+                        len - op->col);
+        }
+        inv.type = OP_CHAR_DEL; inv.line = op->line; inv.col = op->col; inv.ch = op->ch;
+        break;
+    case OP_CHAR_DEL:
+        /* Undo delete: re-insert the character */
+        if (op->line < line_count) {
+            int len = (int)strlen(lines[op->line]);
+            char *nl = malloc(len + 2);
+            if (nl) {
+                memcpy(nl, lines[op->line], op->col);
+                nl[op->col] = op->ch;
+                memcpy(nl + op->col + 1, lines[op->line] + op->col, len - op->col + 1);
+                free(lines[op->line]); lines[op->line] = nl;
+            }
+        }
+        inv.type = OP_CHAR_INS; inv.line = op->line; inv.col = op->col; inv.ch = op->ch;
+        break;
+    case OP_LINE_SPLIT:
+        /* Undo split: join lines[op->line] and lines[op->line+1] back together */
+        if (op->line + 1 < line_count) {
+            int a_len = (int)strlen(lines[op->line]);
+            int b_len = (int)strlen(lines[op->line + 1]);
+            char *merged = malloc(a_len + b_len + 1);
+            if (merged) {
+                memcpy(merged, lines[op->line], a_len);
+                memcpy(merged + a_len, lines[op->line + 1], b_len + 1);
+                free(lines[op->line]); lines[op->line] = merged;
+                remove_line_at(op->line + 1);
+            }
+        }
+        inv.type = OP_LINE_SPLIT; inv.line = op->line; inv.col = op->col;
+        break;
+    case OP_LINE_JOIN:
+        /* Undo join: re-split lines[op->line] at op->col */
+        if (op->line < line_count && op->bulk_lines) {
+            char *head = xstrdup(lines[op->line]);
+            head[op->col] = '\0';
+            free(lines[op->line]); lines[op->line] = head;
+            insert_line_at(op->line + 1, op->bulk_lines[0]);
+        }
+        inv.type = OP_LINE_JOIN; inv.line = op->line; inv.col = op->col;
+        if (op->bulk_lines) {
+            inv.bulk_lines = malloc(sizeof(char *));
+            if (inv.bulk_lines) { inv.bulk_lines[0] = xstrdup(op->bulk_lines[0]); inv.bulk_count = 1; }
+        }
+        break;
+    case OP_BULK: {
+        /* Save current state as redo inverse, then restore snapshot */
+        int bs = op->bulk_start, bc = op->bulk_count, bt = op->bulk_total;
+        inv.type = OP_BULK;
+        inv.bulk_start = bs;
+        inv.bulk_count = bt;   /* redo needs to restore current (pre-undo) state */
+        inv.bulk_total = bc;   /* and shrink/grow back */
+        inv.bulk_lines = malloc(bt * sizeof(char *));
+        if (inv.bulk_lines) {
+            /* snapshot current lines (the state we are about to overwrite) */
+            int snap_count = (bt < line_count) ? bt : line_count;
+            for (int i = 0; i < snap_count; i++)
+                inv.bulk_lines[i] = xstrdup(lines[(bs + i < line_count) ? bs + i : line_count - 1]);
+            for (int i = snap_count; i < bt; i++) inv.bulk_lines[i] = xstrdup("");
+            inv.bulk_count = bt;
+        }
+        /* Restore: truncate to bulk_start then re-append saved lines */
+        while (line_count > bs) remove_line_at(line_count - 1);
+        for (int i = 0; i < bc; i++) {
+            ensure_capacity(line_count + 1);
+            lines[line_count] = xstrdup(op->bulk_lines[i]);
             line_count++;
         }
-    } else {
-        for (int i = 0; i < b->num_lines; i++)
-            set_line(b->deltas[i].line_index, b->deltas[i].original_text);
+        if (line_count == 0) { ensure_capacity(1); lines[0] = xstrdup(""); line_count = 1; }
+        break;
     }
-    current_line = b->current_line;
-    cursor_x = b->cursor_x;
-    undo_stack_top--;
+    }
+
+    current_line = op->saved_line;
+    cursor_x    = op->saved_col;
+    if (current_line >= line_count) current_line = line_count - 1;
+    if (current_line < 0) current_line = 0;
+    int clen = (int)strlen(lines[current_line]);
+    if (cursor_x > clen) cursor_x = clen;
+
+    /* Move op off undo stack */
+    free_op(op);
+    undo_count--;
+
+    /* Push inverse onto redo stack */
+    if (redo_top < UNDO_CAP - 1) {
+        redo_top++;
+        redo_buf[redo_top] = inv;
+    } else {
+        free_op(&inv);
+    }
+
+    is_modified = 1;
     snprintf(status_msg, sizeof(status_msg), "Undo performed.");
+}
+
+void redo_op(void) {
+    if (redo_top < 0) { snprintf(status_msg, sizeof(status_msg), "Nothing to redo!"); return; }
+    UndoOp *op = &redo_buf[redo_top];
+
+    /* Re-apply the operation (same logic as undo but for the inverse) */
+    switch (op->type) {
+    case OP_CHAR_INS: {
+        int len = (int)strlen(lines[op->line]);
+        char *nl = malloc(len + 2);
+        if (nl) {
+            memcpy(nl, lines[op->line], op->col);
+            nl[op->col] = op->ch;
+            memcpy(nl + op->col + 1, lines[op->line] + op->col, len - op->col + 1);
+            free(lines[op->line]); lines[op->line] = nl;
+        }
+        break;
+    }
+    case OP_CHAR_DEL: {
+        int len = (int)strlen(lines[op->line]);
+        if (op->col < len)
+            memmove(lines[op->line] + op->col,
+                    lines[op->line] + op->col + 1,
+                    len - op->col);
+        break;
+    }
+    case OP_LINE_SPLIT: {
+        char *tail = xstrdup(lines[op->line] + op->col);
+        lines[op->line][op->col] = '\0';
+        insert_line_at(op->line + 1, tail);
+        free(tail);
+        break;
+    }
+    case OP_LINE_JOIN:
+        if (op->line + 1 < line_count) {
+            int a = (int)strlen(lines[op->line]);
+            int b = (int)strlen(lines[op->line + 1]);
+            char *merged = malloc(a + b + 1);
+            if (merged) {
+                memcpy(merged, lines[op->line], a);
+                memcpy(merged + a, lines[op->line + 1], b + 1);
+                free(lines[op->line]); lines[op->line] = merged;
+                remove_line_at(op->line + 1);
+            }
+        }
+        break;
+    case OP_BULK: {
+        int bs = op->bulk_start, bc = op->bulk_count;
+        while (line_count > bs) remove_line_at(line_count - 1);
+        for (int i = 0; i < bc; i++) {
+            ensure_capacity(line_count + 1);
+            lines[line_count] = xstrdup(op->bulk_lines[i]);
+            line_count++;
+        }
+        if (line_count == 0) { ensure_capacity(1); lines[0] = xstrdup(""); line_count = 1; }
+        break;
+    }
+    }
+
+    current_line = op->saved_line;
+    cursor_x    = op->saved_col;
+    if (current_line >= line_count) current_line = line_count - 1;
+    if (current_line < 0) current_line = 0;
+    int clen = (int)strlen(lines[current_line]);
+    if (cursor_x > clen) cursor_x = clen;
+
+    free_op(op);
+    redo_top--;
+    is_modified = 1;
+    snprintf(status_msg, sizeof(status_msg), "Redo performed.");
 }
 
 /* ---------- file I/O ---------- */
 void load_file(const char *filename) {
-    undo_stack_top = -1;
+    /* Clear undo and redo stacks on file load */
+    for (int i = 0; i < undo_count; i++) free_op(&undo_buf[(undo_head + i) % UNDO_CAP]);
+    undo_head = 0; undo_count = 0;
+    for (int i = 0; i <= redo_top; i++) free_op(&redo_buf[i]);
+    redo_top = -1;
 
     char swp_filename[256];
     snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", filename);
@@ -476,9 +719,26 @@ void draw_screen() {
     move(LINES - 2, 0); clrtoeol();
     for (int x = 0; x < COLS; x++) mvaddch(LINES - 2, x, ACS_HLINE);
     move(LINES - 1, 0); clrtoeol();
-    attron(COLOR_PAIR(3));
-    printw(" %s", status_msg);
-    attroff(COLOR_PAIR(3));
+    if (strlen(status_msg) > 0) {
+        attron(COLOR_PAIR(1));
+        mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
+        attroff(COLOR_PAIR(1));
+    } else {
+        if (!is_modified) {
+            mvprintw(LINES - 1, 0,
+                "qi text editor, v.%s (c) 2026, Christopher Camacho | Cur: %d/%d | (^? for Help)",
+                VERSION, current_line + 1, cursor_x + 1);
+        } else {
+            int total_chars = 0, modified_lines = 0;
+            for (int i = 0; i < line_count; i++) {
+                total_chars += (int)strlen(lines[i]);
+                if (tracker_is_modified(i, 0)) modified_lines++;
+            }
+            mvprintw(LINES - 1, 0,
+                "Lines Mod: %d | Total Chars: %d | Cur: %d/%d | (^? for Help)",
+                modified_lines, total_chars, current_line + 1, cursor_x + 1);
+        }
+    }
 
     /* Cursor placement — use the same wrap width as draw_screen (COLS - 7) */
     int text_width = COLS - 7;
@@ -759,7 +1019,7 @@ void delete_lines_interactive() {
 
 /* ---------- help window ---------- */
 void show_help_window() {
-    int height = 18, width = 50;
+    int height = 19, width = 50;
     int start_y = (LINES - height) / 2;
     int start_x = (COLS - width) / 2;
     WINDOW *help_win = newwin(height, width, start_y, start_x);
@@ -776,6 +1036,7 @@ void show_help_window() {
         "Ctrl+R  Find & Replace",
         "Ctrl+G  Go to line",
         "Ctrl+U  Undo",
+        "Ctrl+Y  Redo",
         "Ctrl+D  Delete line(s)",
         "Ctrl+X  Toggle Insert/Overwrite",
         "Ctrl+T  Top of file",
@@ -784,7 +1045,7 @@ void show_help_window() {
         "",
         "Press any key to close..."
     };
-    for (int i = 0; i < 14; i++)
+    for (int i = 0; i < 15; i++)
         mvwprintw(help_win, 2 + i, 2, "%s", help[i]);
     wrefresh(help_win);
     wgetch(help_win);
@@ -814,7 +1075,8 @@ int main(int argc, char *argv[]) {
     /* Initialise tracker with a modest hint; it only uses 1 byte per line */
     tracker_init(1024, 1);
 
-    memset(undo_stack, 0, sizeof(undo_stack));
+    undo_buf = calloc(UNDO_CAP, sizeof(UndoOp));
+    redo_buf = calloc(UNDO_CAP, sizeof(UndoOp));
 
     /* Bootstrap with one empty line */
     ensure_capacity(1);
@@ -879,6 +1141,7 @@ int main(int argc, char *argv[]) {
         else if (ch == CTRL_KEY('r')) replace_text();
         else if (ch == CTRL_KEY('g')) goto_line();
         else if (ch == CTRL_KEY('u')) undo();
+        else if (ch == CTRL_KEY('y')) redo_op();
         else if (ch == CTRL_KEY('d')) delete_lines_interactive();
         else if (ch == CTRL_KEY('x')) {
             overwrite_mode = !overwrite_mode;
@@ -1016,13 +1279,13 @@ int main(int argc, char *argv[]) {
             (void)0;
         }
         else if (ch == 9) {
-            /* Tab */
+            /* Tab — record as bulk (multi-char insert) */
             int len = strlen(lines[current_line]);
             int is_makefile = (strstr(current_filename, "Makefile") != NULL);
             int tab_size = is_makefile ? 1 : 4;
             char *new_line = malloc(len + tab_size + 1);
             if (new_line) {
-                save_undo_state_single(current_line);
+                record_bulk(current_line, 1);
                 memcpy(new_line, lines[current_line], cursor_x);
                 if (is_makefile) new_line[cursor_x] = '\t';
                 else memset(new_line + cursor_x, ' ', tab_size);
@@ -1035,9 +1298,8 @@ int main(int argc, char *argv[]) {
             }
         }
         else if (ch == 10 || ch == 13) {
-            /* Enter */
-            if (!paste_batch_active) save_undo_state_single(current_line);
-            /* Split current line at cursor */
+            /* Enter — record line split */
+            if (!paste_batch_active) record_line_split(current_line, cursor_x);
             char *tail = xstrdup(lines[current_line] + cursor_x);
             lines[current_line][cursor_x] = '\0';
             insert_line_at(current_line + 1, tail);
@@ -1060,19 +1322,21 @@ int main(int argc, char *argv[]) {
         }
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (cursor_x > 0) {
-                save_undo_state_single(current_line);
+                /* Backspace within a line — record char deletion */
+                record_char_del(current_line, cursor_x - 1, lines[current_line][cursor_x - 1]);
                 int len = strlen(lines[current_line]);
                 memmove(lines[current_line] + cursor_x - 1,
                         lines[current_line] + cursor_x,
                         len - cursor_x + 1);
                 cursor_x--; is_modified = 1;
             } else if (current_line > 0) {
-                save_undo_state_single(current_line);
+                /* Backspace at start of line — record line join */
                 int target = current_line - 1;
                 int target_len = strlen(lines[target]);
                 int cur_len = strlen(lines[current_line]);
                 char *merged = malloc(target_len + cur_len + 1);
                 if (merged) {
+                    record_line_join(target, target_len, lines[current_line]);
                     memcpy(merged, lines[target], target_len);
                     memcpy(merged + target_len, lines[current_line], cur_len + 1);
                     free(lines[target]); lines[target] = merged;
@@ -1086,17 +1350,19 @@ int main(int argc, char *argv[]) {
         else if (ch == KEY_DC || ch == 330) {
             int len = strlen(lines[current_line]);
             if (cursor_x < len) {
-                save_undo_state_single(current_line);
+                /* Delete key within a line — record char deletion */
+                record_char_del(current_line, cursor_x, lines[current_line][cursor_x]);
                 memmove(lines[current_line] + cursor_x,
                         lines[current_line] + cursor_x + 1,
                         len - cursor_x);
                 is_modified = 1;
             } else if (current_line < line_count - 1) {
+                /* Delete at end of line — record line join */
                 int next = current_line + 1;
                 int next_len = strlen(lines[next]);
                 char *merged = malloc(len + next_len + 1);
                 if (merged) {
-                    save_undo_state_single(current_line);
+                    record_line_join(current_line, len, lines[next]);
                     memcpy(merged, lines[current_line], len);
                     memcpy(merged + len, lines[next], next_len + 1);
                     free(lines[current_line]); lines[current_line] = merged;
@@ -1108,10 +1374,8 @@ int main(int argc, char *argv[]) {
         else if (ch >= 32 && ch <= 126) {
             int len = strlen(lines[current_line]);
             if (!paste_batch_active) {
-                if (cursor_x == 0 || (lines[current_line][cursor_x-1] == ' ' && ch != ' '))
-                    save_undo_state_single(current_line);
-                else if (mod_count == 0 || cursor_x % 10 == 0)
-                    save_undo_state_single(current_line);
+                /* Record char insert; group consecutive chars on same line */
+                record_char_ins(current_line, cursor_x, (char)ch);
             }
             if (overwrite_mode && cursor_x < len) {
                 lines[current_line][cursor_x] = (char)ch;
@@ -1131,7 +1395,10 @@ int main(int argc, char *argv[]) {
         }
     } /* end while(1) */
 
-    undo_stack_top = -1;
+    for (int i = 0; i < undo_count; i++) free_op(&undo_buf[(undo_head + i) % UNDO_CAP]);
+    free(undo_buf);
+    for (int i = 0; i <= redo_top; i++) free_op(&redo_buf[i]);
+    free(redo_buf);
     tracker_free();
     for (int i = 0; i < line_count; i++) free(lines[i]);
     free(lines);
