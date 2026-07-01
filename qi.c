@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.13 (2026)
+ * Version: 1.1.14 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.13"
+#define VERSION "1.1.14"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -89,6 +89,9 @@ int match_col  = -1;
 
 /* Line clipboard for Ctrl+K / Ctrl+P */
 static char *clipboard_line = NULL;
+
+/* Syntax highlight toggle */
+static int syntax_highlight_enabled = 1;
 
 /* ---------- undo / redo ----------
  *
@@ -592,40 +595,54 @@ void draw_screen() {
     int wrap_col = COLS - 1;
     int file_line_index = scroll_y;
 
+    /* Gutter width scales with the number of digits in line_count */
+    int gutter_digits = 1;
+    { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gutter_digits++; } }
+    /* gutter layout: <digits> + 1 space + 1 marker + 1 space = digits+3 cols; text starts at digits+3 */
+    int gutter_width = gutter_digits + 3;
+
     while (physical_row < 2 + max_displayable_lines && file_line_index < line_count) {
         move(physical_row, 0); clrtoeol();
 
         if (file_line_index == current_line) {
             attron(COLOR_PAIR(1));
-            mvprintw(physical_row, 0, "%3d ", file_line_index + 1);
+            mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
             attroff(COLOR_PAIR(1));
             attron(COLOR_PAIR(1) | A_BOLD);
-            mvaddch(physical_row, 4, ACS_DIAMOND);
+            mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
             attroff(COLOR_PAIR(1) | A_BOLD);
         } else {
-            mvprintw(physical_row, 0, "%3d ", file_line_index + 1);
-            mvaddch(physical_row, 4, ACS_VLINE);
+            mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+            mvaddch(physical_row, gutter_digits + 1, ACS_VLINE);
         }
 
         char *line = lines[file_line_index];
         int len = strlen(line);
         int current_phys_row = physical_row;
-        int current_phys_col = 6;
+        int current_phys_col = gutter_width;
 
         move(current_phys_row, current_phys_col);
 
         /* Get syntax spans for this line */
         Span spans[MAX_SPANS];
-        int nspans = syntax_spans(file_line_index, line, spans);
+        int nspans = syntax_highlight_enabled ? syntax_spans(file_line_index, line, spans) : 0;
 
         /* Colour-pair lookup: TOK -> ncurses pair */
         static const int tok_pair[] = { 0, 2, 4, 5, 3 };
 
         /* Render character by character, applying span colours */
+        /* Show '>' at right edge of first visual row if line extends beyond terminal */
+        if (len > wrap_col - gutter_width) {
+            attron(A_DIM);
+            mvaddch(physical_row, wrap_col - 1, '>');
+            attroff(A_DIM);
+            move(physical_row, gutter_width);
+        }
+
         int span_idx = 0;
         for (int j = 0; j < len; j++) {
             if (current_phys_col >= wrap_col) {
-                current_phys_row++; current_phys_col = 6;
+                current_phys_row++; current_phys_col = gutter_width;
                 if (current_phys_row < 2 + max_displayable_lines) {
                     move(current_phys_row, current_phys_col);
                     clrtoeol();
@@ -685,7 +702,9 @@ void draw_screen() {
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
         attroff(COLOR_PAIR(1));
     } else {
-        int vis_col = (cursor_x % (COLS - 7)) + 1;
+        int gd_s = 1; { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd_s++; } }
+        int tw_s = COLS - 1 - (gd_s + 3);
+        int vis_col = (tw_s > 0) ? (cursor_x % tw_s) + 1 : cursor_x + 1;
         if (!is_modified) {
             mvprintw(LINES - 1, 0,
                 "qi text editor, v.%s (c) 2026, Christopher Camacho | Ln: %d Col: %d | (^? for Help)",
@@ -702,16 +721,18 @@ void draw_screen() {
         }
     }
 
-    /* Cursor placement — use the same wrap width as draw_screen (COLS - 7) */
-    int text_width = COLS - 7;
+    /* Cursor placement — gutter_width matches the dynamic gutter computed above */
+    int gd2 = 1; { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd2++; } }
+    int gw2 = gd2 + 3;
+    int text_width2 = COLS - 1 - gw2;
     int cursor_physical_row = 2;
     for (int i = scroll_y; i < current_line; i++) {
         int l_len = strlen(lines[i]);
-        int l_rows = (l_len == 0) ? 1 : (l_len / text_width) + 1;
+        int l_rows = (l_len == 0) ? 1 : (l_len / text_width2) + 1;
         cursor_physical_row += l_rows;
     }
-    cursor_physical_row += (cursor_x / text_width);
-    int cursor_physical_col = 6 + (cursor_x % text_width);
+    cursor_physical_row += (cursor_x / text_width2);
+    int cursor_physical_col = gw2 + (cursor_x % text_width2);
 
     if (cursor_physical_row < LINES - 2) move(cursor_physical_row, cursor_physical_col);
     else move(LINES - 3, COLS - 1);
@@ -981,7 +1002,7 @@ void delete_lines_interactive() {
 
 /* ---------- help window ---------- */
 void show_help_window() {
-    int height = 23, width = 50;
+    int height = 27, width = 50;
     int start_y = (LINES - height) / 2;
     int start_x = (COLS - width) / 2;
     WINDOW *help_win = newwin(height, width, start_y, start_x);
@@ -991,7 +1012,7 @@ void show_help_window() {
     mvwprintw(help_win, 0, (width - 10) / 2, " qi v%s ", VERSION);
     wattroff(help_win, COLOR_PAIR(1) | A_BOLD);
     const char *help[] = {
-        "Ctrl+W  Save file",
+        "Ctrl+S  Save file",
         "Ctrl+O  Open file",
         "Ctrl+Q  Quit",
         "Ctrl+F  Find text",
@@ -1002,6 +1023,10 @@ void show_help_window() {
         "Ctrl+D  Delete line(s)",
         "Ctrl+K  Cut line",
         "Ctrl+P  Paste line",
+        "Ctrl+W  Delete word left",
+        "Ctrl+J  Duplicate line",
+        "Ctrl+H  Toggle syntax highlight",
+        "Shift+Tab  Dedent line",
         "Ctrl+X  Toggle Insert/Overwrite",
         "Ctrl+T  Top of file",
         "Ctrl+B  Bottom of file",
@@ -1011,7 +1036,7 @@ void show_help_window() {
         "",
         "Press any key to close..."
     };
-    for (int i = 0; i < 19; i++)
+    for (int i = 0; i < 23; i++)
         mvwprintw(help_win, 2 + i, 2, "%s", help[i]);
     wrefresh(help_win);
     wgetch(help_win);
@@ -1105,7 +1130,36 @@ int main(int argc, char *argv[]) {
             } else break;
         }
         else if (ch == CTRL_KEY('o')) interactive_open();
-        else if (ch == CTRL_KEY('w')) save_file();
+        else if (ch == CTRL_KEY('s')) save_file();
+        else if (ch == CTRL_KEY('w')) {
+            /* Delete word to the left of the cursor */
+            if (cursor_x > 0) {
+                int orig = cursor_x;
+                /* skip trailing spaces */
+                while (cursor_x > 0 && isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
+                /* skip word chars */
+                while (cursor_x > 0 && !isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
+                record_bulk(current_line, 1);
+                int line_len = (int)strlen(lines[current_line]);
+                memmove(lines[current_line] + cursor_x,
+                        lines[current_line] + orig,
+                        line_len - orig + 1);
+                is_modified = 1;
+            }
+        }
+        else if (ch == CTRL_KEY('h')) {
+            syntax_highlight_enabled = !syntax_highlight_enabled;
+            snprintf(status_msg, sizeof(status_msg), "Syntax highlighting %s.",
+                     syntax_highlight_enabled ? "on" : "off");
+        }
+        else if (ch == CTRL_KEY('j')) {
+            /* Duplicate current line */
+            record_bulk(current_line, 1);
+            insert_line_at(current_line + 1, lines[current_line]);
+            current_line++;
+            is_modified = 1;
+            snprintf(status_msg, sizeof(status_msg), "Line duplicated.");
+        }
         else if (ch == CTRL_KEY('f')) find_text();
         else if (ch == CTRL_KEY('?')) show_help_window();
         else if (ch == CTRL_KEY('r')) replace_text();
@@ -1173,7 +1227,9 @@ int main(int argc, char *argv[]) {
                 int click_col = (int)me.x;
                 /* rows 0 and 1 are header; rows LINES-2 and LINES-1 are status */
                 if (click_row >= 2 && click_row < LINES - 2) {
-                    int text_width = COLS - 7;
+                    int gd_m=1; { int tmp=line_count; while(tmp>=10){tmp/=10;gd_m++;} }
+                    int gw_m = gd_m + 3;
+                    int text_width = COLS - 1 - gw_m;
                     /* Walk file lines from scroll_y, accumulating visual rows,
                      * to find which file line and column the click lands on. */
                     int phys = 2;
@@ -1184,7 +1240,7 @@ int main(int argc, char *argv[]) {
                         if (click_row < phys + vrows) {
                             /* click is within this file line */
                             int row_within = click_row - phys;
-                            int col_within = click_col - 6;
+                            int col_within = click_col - gw_m;
                             if (col_within < 0) col_within = 0;
                             int new_cx = row_within * text_width + col_within;
                             if (new_cx > ll) new_cx = ll;
@@ -1223,7 +1279,8 @@ int main(int argc, char *argv[]) {
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-                int available_width = COLS - 7;
+                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;} 
+                int available_width = COLS - 1 - (gd_u + 3);
                 int visual_rows_above = 0;
                 for (int i = scroll_y; i < current_line; i++) {
                     int l_len = strlen(lines[i]);
@@ -1238,7 +1295,7 @@ int main(int argc, char *argv[]) {
                             visual_rows_above += (l_len == 0) ? 1 : (l_len / available_width) + 1;
                         }
                     }
-                }
+                } }
                 int len = strlen(lines[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
@@ -1247,7 +1304,8 @@ int main(int argc, char *argv[]) {
             if (current_line < line_count - 1) {
                 current_line++;
                 int max_displayable_lines = LINES - 4;
-                int available_width = COLS - 7;
+                { int gd_d=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_d++;}
+                int available_width = COLS - 1 - (gd_d + 3);
                 int visual_row_index = 0;
                 for (int i = scroll_y; i <= current_line; i++) {
                     int l_len = strlen(lines[i]);
@@ -1259,7 +1317,7 @@ int main(int argc, char *argv[]) {
                     scroll_y++;
                     if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
                     if (scroll_y < 0) scroll_y = 0;
-                }
+                } }
                 int len = strlen(lines[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
@@ -1354,6 +1412,29 @@ int main(int argc, char *argv[]) {
                 is_modified = 1; mod_count++;
             }
         }
+        else if (ch == 353) {
+            /* Shift+Tab — dedent: remove up to one tab-width of leading spaces */
+            int is_makefile = (strstr(current_filename, "Makefile") != NULL);
+            int tab_size = is_makefile ? 1 : 4;
+            int removed = 0;
+            record_bulk(current_line, 1);
+            while (removed < tab_size && lines[current_line][0] == ' ') {
+                int ll = (int)strlen(lines[current_line]);
+                memmove(lines[current_line], lines[current_line] + 1, ll);
+                removed++;
+            }
+            /* also handle a leading hard tab */
+            if (removed == 0 && lines[current_line][0] == '\t') {
+                int ll = (int)strlen(lines[current_line]);
+                memmove(lines[current_line], lines[current_line] + 1, ll);
+                removed = 1;
+            }
+            if (removed > 0) {
+                if (cursor_x >= removed) cursor_x -= removed;
+                else cursor_x = 0;
+                is_modified = 1;
+            }
+        }
         else if (ch == 10 || ch == 13) {
             /* Enter — record line split */
             if (!paste_batch_active) record_line_split(current_line, cursor_x);
@@ -1381,7 +1462,8 @@ int main(int argc, char *argv[]) {
             is_modified = 1;
 
             int max_displayable_lines = LINES - 4;
-            int available_width = COLS - 7;
+            { int gd_e=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_e++;}
+            int available_width = COLS - 1 - (gd_e + 3);
             int visual_row_index = 0;
             for (int i = scroll_y; i < current_line; i++) {
                 int l_len = strlen(lines[i]);
@@ -1391,7 +1473,7 @@ int main(int argc, char *argv[]) {
                 scroll_y++;
                 if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
                 if (scroll_y < 0) scroll_y = 0;
-            }
+            } }
         }
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (cursor_x > 0) {
