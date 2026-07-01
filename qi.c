@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.5 (2026)
+ * Version: 1.1.9 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.5"
+#define VERSION "1.1.9"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -148,10 +148,6 @@ static void free_op(UndoOp *op) {
 
 /* Push op onto the undo ring, evicting the oldest entry if full. */
 static void push_undo(UndoOp *op) {
-    /* Clear redo stack on any new edit */
-    for (int i = 0; i <= redo_top; i++) free_op(&redo_buf[i]);
-    redo_top = -1;
-
     if (undo_count == UNDO_CAP) {
         /* Evict oldest */
         free_op(&undo_buf[undo_head]);
@@ -222,18 +218,41 @@ static void record_bulk(int start, int count) {
 void save_undo_state_single(int line_idx) { record_bulk(line_idx, 1); }
 void save_undo_state_batch(int start_line, int count) { record_bulk(start_line, count); }
 
+/* Push a full-file snapshot onto the redo stack so redo_op can restore it exactly. */
+static void push_redo_snapshot(int saved_ln, int saved_cx) {
+    if (redo_top >= UNDO_CAP - 1) {
+        /* Drop the oldest redo entry (bottom of stack) to make room */
+        free_op(&redo_buf[0]);
+        memmove(&redo_buf[0], &redo_buf[1], redo_top * sizeof(UndoOp));
+        redo_top--;
+    }
+    redo_top++;
+    UndoOp *r = &redo_buf[redo_top];
+    memset(r, 0, sizeof(UndoOp));
+    r->type       = OP_BULK;
+    r->bulk_start = 0;
+    r->bulk_count = line_count;
+    r->bulk_total = line_count;
+    r->saved_line = saved_ln;
+    r->saved_col  = saved_cx;
+    r->bulk_lines = malloc(line_count * sizeof(char *));
+    if (r->bulk_lines)
+        for (int i = 0; i < line_count; i++)
+            r->bulk_lines[i] = xstrdup(lines[i]);
+}
+
 void undo(void) {
     if (undo_count == 0) { snprintf(status_msg, sizeof(status_msg), "Nothing to undo!"); return; }
 
     int slot = (undo_head + undo_count - 1) % UNDO_CAP;
     UndoOp *op = &undo_buf[slot];
-    UndoOp inv = {0};
-    inv.saved_line = op->saved_line;
-    inv.saved_col  = op->saved_col;
+
+    /* Snapshot the current state onto the redo stack BEFORE applying undo.
+     * redo_op() will restore this snapshot exactly, reverting the undo. */
+    push_redo_snapshot(current_line, cursor_x);
 
     switch (op->type) {
     case OP_CHAR_INS:
-        /* Undo insert: delete the character */
         if (op->line < line_count) {
             int len = (int)strlen(lines[op->line]);
             if (op->col < len)
@@ -241,10 +260,8 @@ void undo(void) {
                         lines[op->line] + op->col + 1,
                         len - op->col);
         }
-        inv.type = OP_CHAR_DEL; inv.line = op->line; inv.col = op->col; inv.ch = op->ch;
         break;
     case OP_CHAR_DEL:
-        /* Undo delete: re-insert the character */
         if (op->line < line_count) {
             int len = (int)strlen(lines[op->line]);
             char *nl = malloc(len + 2);
@@ -255,10 +272,8 @@ void undo(void) {
                 free(lines[op->line]); lines[op->line] = nl;
             }
         }
-        inv.type = OP_CHAR_INS; inv.line = op->line; inv.col = op->col; inv.ch = op->ch;
         break;
     case OP_LINE_SPLIT:
-        /* Undo split: join lines[op->line] and lines[op->line+1] back together */
         if (op->line + 1 < line_count) {
             int a_len = (int)strlen(lines[op->line]);
             int b_len = (int)strlen(lines[op->line + 1]);
@@ -270,116 +285,13 @@ void undo(void) {
                 remove_line_at(op->line + 1);
             }
         }
-        inv.type = OP_LINE_SPLIT; inv.line = op->line; inv.col = op->col;
         break;
     case OP_LINE_JOIN:
-        /* Undo join: re-split lines[op->line] at op->col */
         if (op->line < line_count && op->bulk_lines) {
             char *head = xstrdup(lines[op->line]);
             head[op->col] = '\0';
             free(lines[op->line]); lines[op->line] = head;
             insert_line_at(op->line + 1, op->bulk_lines[0]);
-        }
-        inv.type = OP_LINE_JOIN; inv.line = op->line; inv.col = op->col;
-        if (op->bulk_lines) {
-            inv.bulk_lines = malloc(sizeof(char *));
-            if (inv.bulk_lines) { inv.bulk_lines[0] = xstrdup(op->bulk_lines[0]); inv.bulk_count = 1; }
-        }
-        break;
-    case OP_BULK: {
-        /* Save current state as redo inverse, then restore snapshot */
-        int bs = op->bulk_start, bc = op->bulk_count, bt = op->bulk_total;
-        inv.type = OP_BULK;
-        inv.bulk_start = bs;
-        inv.bulk_count = bt;   /* redo needs to restore current (pre-undo) state */
-        inv.bulk_total = bc;   /* and shrink/grow back */
-        inv.bulk_lines = malloc(bt * sizeof(char *));
-        if (inv.bulk_lines) {
-            /* snapshot current lines (the state we are about to overwrite) */
-            int snap_count = (bt < line_count) ? bt : line_count;
-            for (int i = 0; i < snap_count; i++)
-                inv.bulk_lines[i] = xstrdup(lines[(bs + i < line_count) ? bs + i : line_count - 1]);
-            for (int i = snap_count; i < bt; i++) inv.bulk_lines[i] = xstrdup("");
-            inv.bulk_count = bt;
-        }
-        /* Restore: truncate to bulk_start then re-append saved lines */
-        while (line_count > bs) remove_line_at(line_count - 1);
-        for (int i = 0; i < bc; i++) {
-            ensure_capacity(line_count + 1);
-            lines[line_count] = xstrdup(op->bulk_lines[i]);
-            line_count++;
-        }
-        if (line_count == 0) { ensure_capacity(1); lines[0] = xstrdup(""); line_count = 1; }
-        break;
-    }
-    }
-
-    current_line = op->saved_line;
-    cursor_x    = op->saved_col;
-    if (current_line >= line_count) current_line = line_count - 1;
-    if (current_line < 0) current_line = 0;
-    int clen = (int)strlen(lines[current_line]);
-    if (cursor_x > clen) cursor_x = clen;
-
-    /* Move op off undo stack */
-    free_op(op);
-    undo_count--;
-
-    /* Push inverse onto redo stack */
-    if (redo_top < UNDO_CAP - 1) {
-        redo_top++;
-        redo_buf[redo_top] = inv;
-    } else {
-        free_op(&inv);
-    }
-
-    is_modified = 1;
-    snprintf(status_msg, sizeof(status_msg), "Undo performed.");
-}
-
-void redo_op(void) {
-    if (redo_top < 0) { snprintf(status_msg, sizeof(status_msg), "Nothing to redo!"); return; }
-    UndoOp *op = &redo_buf[redo_top];
-
-    /* Re-apply the operation (same logic as undo but for the inverse) */
-    switch (op->type) {
-    case OP_CHAR_INS: {
-        int len = (int)strlen(lines[op->line]);
-        char *nl = malloc(len + 2);
-        if (nl) {
-            memcpy(nl, lines[op->line], op->col);
-            nl[op->col] = op->ch;
-            memcpy(nl + op->col + 1, lines[op->line] + op->col, len - op->col + 1);
-            free(lines[op->line]); lines[op->line] = nl;
-        }
-        break;
-    }
-    case OP_CHAR_DEL: {
-        int len = (int)strlen(lines[op->line]);
-        if (op->col < len)
-            memmove(lines[op->line] + op->col,
-                    lines[op->line] + op->col + 1,
-                    len - op->col);
-        break;
-    }
-    case OP_LINE_SPLIT: {
-        char *tail = xstrdup(lines[op->line] + op->col);
-        lines[op->line][op->col] = '\0';
-        insert_line_at(op->line + 1, tail);
-        free(tail);
-        break;
-    }
-    case OP_LINE_JOIN:
-        if (op->line + 1 < line_count) {
-            int a = (int)strlen(lines[op->line]);
-            int b = (int)strlen(lines[op->line + 1]);
-            char *merged = malloc(a + b + 1);
-            if (merged) {
-                memcpy(merged, lines[op->line], a);
-                memcpy(merged + a, lines[op->line + 1], b + 1);
-                free(lines[op->line]); lines[op->line] = merged;
-                remove_line_at(op->line + 1);
-            }
         }
         break;
     case OP_BULK: {
@@ -401,6 +313,36 @@ void redo_op(void) {
     if (current_line < 0) current_line = 0;
     int clen = (int)strlen(lines[current_line]);
     if (cursor_x > clen) cursor_x = clen;
+
+    free_op(op);
+    undo_count--;
+
+    is_modified = 1;
+    snprintf(status_msg, sizeof(status_msg), "Undo performed.");
+}
+
+void redo_op(void) {
+    if (redo_top < 0) { snprintf(status_msg, sizeof(status_msg), "Nothing to redo!"); return; }
+    UndoOp *op = &redo_buf[redo_top];
+
+    /* Restore the snapshot that was taken just before undo ran. */
+    int bs = op->bulk_start, bc = op->bulk_count;
+    while (line_count > bs) remove_line_at(line_count - 1);
+    if (op->bulk_lines) {
+        for (int i = 0; i < bc; i++) {
+            ensure_capacity(line_count + 1);
+            lines[line_count] = xstrdup(op->bulk_lines[i]);
+            line_count++;
+        }
+    }
+    if (line_count == 0) { ensure_capacity(1); lines[0] = xstrdup(""); line_count = 1; }
+
+    current_line = op->saved_line;
+    cursor_x    = op->saved_col;
+    if (current_line >= line_count) current_line = line_count - 1;
+    if (current_line < 0) current_line = 0;
+    int clen2 = (int)strlen(lines[current_line]);
+    if (cursor_x > clen2) cursor_x = clen2;
 
     free_op(op);
     redo_top--;
@@ -1111,7 +1053,7 @@ int main(int argc, char *argv[]) {
         double ms_since_last = ((double)(now - last_input_time) / CLOCKS_PER_SEC) * 1000.0;
         last_input_time = now;
 
-        if (ms_since_last < 4.0 && ch != CTRL_KEY('u') && last_input_time != 0) {
+        if (ms_since_last < 4.0 && ch != CTRL_KEY('u') && ch != CTRL_KEY('y') && last_input_time != 0) {
             if (!paste_batch_active) {
                 save_undo_state_batch(current_line, line_count - current_line);
                 paste_batch_active = 1;
