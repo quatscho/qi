@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.10 (2026)
+ * Version: 1.1.11 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.10"
+#define VERSION "1.1.11"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1029,6 +1029,7 @@ int main(int argc, char *argv[]) {
     init_pair(1, COLOR_YELLOW, COLOR_BLACK);
     noecho();
     curs_set(1);
+    mousemask(BUTTON1_PRESSED, NULL);
 
     /* Initialise tracker with a modest hint; it only uses 1 byte per line */
     tracker_init(1024, 1);
@@ -1111,6 +1112,43 @@ int main(int argc, char *argv[]) {
             int max_displayable_lines = LINES - 4;
             scroll_y = current_line - max_displayable_lines + 1;
             if (scroll_y < 0) scroll_y = 0;
+        }
+        else if (ch == KEY_MOUSE) {
+            MEVENT me;
+            if (getmouse(&me) == OK && (me.bstate & BUTTON1_PRESSED)) {
+                int click_row = (int)me.y;
+                int click_col = (int)me.x;
+                /* rows 0 and 1 are header; rows LINES-2 and LINES-1 are status */
+                if (click_row >= 2 && click_row < LINES - 2) {
+                    int text_width = COLS - 7;
+                    /* Walk file lines from scroll_y, accumulating visual rows,
+                     * to find which file line and column the click lands on. */
+                    int phys = 2;
+                    int found = 0;
+                    for (int i = scroll_y; i < line_count && phys < LINES - 2; i++) {
+                        int ll = (int)strlen(lines[i]);
+                        int vrows = (ll == 0) ? 1 : (ll / text_width) + 1;
+                        if (click_row < phys + vrows) {
+                            /* click is within this file line */
+                            int row_within = click_row - phys;
+                            int col_within = click_col - 6;
+                            if (col_within < 0) col_within = 0;
+                            int new_cx = row_within * text_width + col_within;
+                            if (new_cx > ll) new_cx = ll;
+                            current_line = i;
+                            cursor_x = new_cx;
+                            found = 1;
+                            break;
+                        }
+                        phys += vrows;
+                    }
+                    /* click below last line: move to end of file */
+                    if (!found && line_count > 0) {
+                        current_line = line_count - 1;
+                        cursor_x = (int)strlen(lines[current_line]);
+                    }
+                }
+            }
         }
         else if (ch == '%') {
             /* Jump to matching bracket */
