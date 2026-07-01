@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.0.24 (2026)
+ * Version: 1.1.0 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -17,12 +17,60 @@
 #include <time.h>
 #include "tracker.h"
 
-#define MAX_LINES 50000
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.0.24"
+#define VERSION "1.1.0"
 
+/* ---------- dynamic line storage ---------- */
+static char **lines = NULL;   /* heap array of heap strings          */
+static int line_cap = 0;      /* allocated slots in lines[]          */
+int line_count = 0;           /* active lines                        */
+
+/* Grow lines[] to hold at least need slots. Returns 0 on OOM. */
+static int ensure_capacity(int need) {
+    if (need <= line_cap) return 1;
+    int new_cap = line_cap ? line_cap * 2 : 256;
+    while (new_cap < need) new_cap *= 2;
+    char **tmp = realloc(lines, new_cap * sizeof(char *));
+    if (!tmp) return 0;
+    lines = tmp;
+    for (int i = line_cap; i < new_cap; i++) lines[i] = NULL;
+    line_cap = new_cap;
+    return 1;
+}
+
+/* Return a heap-allocated copy of s, or empty string on OOM. */
+static char *xstrdup(const char *s) {
+    char *p = strdup(s);
+    return p ? p : strdup("");
+}
+
+/* Replace lines[i] with a copy of s. */
+static void set_line(int i, const char *s) {
+    free(lines[i]);
+    lines[i] = xstrdup(s);
+}
+
+/* Insert a blank line at position i, shifting everything down. */
+static int insert_line_at(int i, const char *s) {
+    if (!ensure_capacity(line_count + 1)) return 0;
+    memmove(&lines[i + 1], &lines[i], (line_count - i) * sizeof(char *));
+    lines[i] = NULL;
+    set_line(i, s);
+    line_count++;
+    return 1;
+}
+
+/* Remove line i, shifting everything up. */
+static void remove_line_at(int i) {
+    free(lines[i]);
+    memmove(&lines[i], &lines[i + 1], (line_count - i - 1) * sizeof(char *));
+    lines[line_count - 1] = NULL;
+    line_count--;
+}
+
+/* ---------- undo ---------- */
 typedef struct {
     int line_index;
     char original_text[MAX_LINE_LEN];
@@ -42,65 +90,51 @@ void save_undo_state_single(int line_idx);
 void save_undo_state_batch(int start_line, int count);
 void undo(void);
 
-// Global state
-char buffer[MAX_LINES][MAX_LINE_LEN] = {0};
-int line_count = 0;
+/* ---------- global state ---------- */
 int current_line = 0;
 int cursor_x = 0;
 int scroll_y = 0;
 char current_filename[256] = "untitled.txt";
 char status_msg[512] = "";
 int is_modified = 0;
-int line_modified[MAX_LINES] = {0};
 int mod_count = 0;
-int overwrite_mode = 0; // 0 = Insert, 1 = Overwrite
+int overwrite_mode = 0;
 clock_t last_char_time = 0;
 int in_paste_stream = 0;
 
 void save_undo_state_single(int line_idx) {
     if (undo_stack_top >= MAX_UNDO - 1) {
-        for (int i = 0; i < MAX_UNDO - 1; i++) {
+        for (int i = 0; i < MAX_UNDO - 1; i++)
             undo_stack[i] = undo_stack[i + 1];
-        }
         undo_stack_top--;
     }
-
     undo_stack_top++;
     undo_stack[undo_stack_top].is_batch = 0;
     undo_stack[undo_stack_top].num_lines = 1;
     undo_stack[undo_stack_top].deltas[0].line_index = line_idx;
-    // Safely copy the line content
-    strncpy(undo_stack[undo_stack_top].deltas[0].original_text, buffer[line_idx], MAX_LINE_LEN - 1);
+    strncpy(undo_stack[undo_stack_top].deltas[0].original_text,
+            lines[line_idx], MAX_LINE_LEN - 1);
     undo_stack[undo_stack_top].deltas[0].original_text[MAX_LINE_LEN - 1] = '\0';
-
     undo_stack[undo_stack_top].cursor_x = cursor_x;
     undo_stack[undo_stack_top].current_line = current_line;
 }
 
 void save_undo_state_batch(int start_line, int count) {
-    // 1. Cap the count to our struct limit
     int actual_count = (count > 150) ? 150 : count;
-
     if (undo_stack_top >= MAX_UNDO - 1) {
-        for (int i = 0; i < MAX_UNDO - 1; i++) {
+        for (int i = 0; i < MAX_UNDO - 1; i++)
             undo_stack[i] = undo_stack[i + 1];
-        }
         undo_stack_top--;
     }
-
     undo_stack_top++;
     undo_stack[undo_stack_top].is_batch = 1;
-
-    // 2. USE actual_count HERE
     undo_stack[undo_stack_top].num_lines = actual_count;
-
-    // 3. USE actual_count IN THE LOOP
     for (int i = 0; i < actual_count; i++) {
         undo_stack[undo_stack_top].deltas[i].line_index = start_line + i;
-        strncpy(undo_stack[undo_stack_top].deltas[i].original_text, buffer[start_line + i], MAX_LINE_LEN - 1);
+        strncpy(undo_stack[undo_stack_top].deltas[i].original_text,
+                lines[start_line + i], MAX_LINE_LEN - 1);
         undo_stack[undo_stack_top].deltas[i].original_text[MAX_LINE_LEN - 1] = '\0';
     }
-
     undo_stack[undo_stack_top].cursor_x = cursor_x;
     undo_stack[undo_stack_top].current_line = current_line;
 }
@@ -110,57 +144,36 @@ void undo(void) {
         snprintf(status_msg, sizeof(status_msg), "Nothing to undo!");
         return;
     }
-
     UndoBatch *b = &undo_stack[undo_stack_top];
-
-    // If it was a batch action (like our multi-line paste or interactive deletes)
     if (b->is_batch) {
-        // Clear old buffer positions beyond what we are restoring
-        for (int i = b->deltas[0].line_index; i < MAX_LINES; i++) {
-            buffer[i][0] = '\0';
-        }
-
-        // Restore saved lines
+        /* Restore saved lines; truncate file to the first saved index */
+        int first = b->deltas[0].line_index;
+        while (line_count > first) remove_line_at(line_count - 1);
         for (int i = 0; i < b->num_lines; i++) {
-            strcpy(buffer[b->deltas[i].line_index], b->deltas[i].original_text);
+            if (!ensure_capacity(line_count + 1)) break;
+            lines[line_count] = xstrdup(b->deltas[i].original_text);
+            line_count++;
         }
-
-        // Dynamically recalculate active line counts based on physical data strings left
-        int new_count = 0;
-        for (int i = 0; i < MAX_LINES; i++) {
-            if (buffer[i][0] != '\0' || i == 0) new_count = i + 1;
-        }
-        line_count = new_count;
     } else {
-        // Standard single line change recovery
-        for (int i = 0; i < b->num_lines; i++) {
-            strcpy(buffer[b->deltas[i].line_index], b->deltas[i].original_text);
-        }
+        for (int i = 0; i < b->num_lines; i++)
+            set_line(b->deltas[i].line_index, b->deltas[i].original_text);
     }
-
-    // Restore cursor positions cleanly
     current_line = b->current_line;
     cursor_x = b->cursor_x;
-
     undo_stack_top--;
     snprintf(status_msg, sizeof(status_msg), "Undo performed.");
 }
 
-// Function to handle the "Open" command
-// 1. Silent file loader used by both main() and the menu
+/* ---------- file I/O ---------- */
 void load_file(const char *filename) {
-    // 1. Existing cleanup for undo_stack
     undo_stack_top = -1;
 
-    // 2. Check for Swap File
     char swp_filename[256];
     snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", filename);
-
     const char *target_file = filename;
     FILE *swp_fp = fopen(swp_filename, "r");
     if (swp_fp) {
         fclose(swp_fp);
-        // Prompt for recovery
         mvprintw(LINES - 1, 0, "Swap file detected for '%s'. Recover? (y/n): ", filename);
         clrtoeol();
         refresh();
@@ -171,163 +184,124 @@ void load_file(const char *filename) {
         }
     }
 
-    // 3. Perform the load
-    memset(line_modified, 0, sizeof(line_modified));
+    /* Free existing lines */
+    for (int i = 0; i < line_count; i++) { free(lines[i]); lines[i] = NULL; }
+    line_count = 0;
+
+    tracker_clear();
+
     FILE *fp = fopen(target_file, "r");
     if (fp) {
-        line_count = 0;
-        while (fgets(buffer[line_count], MAX_LINE_LEN, fp) && line_count < MAX_LINES) {
-            buffer[line_count][strcspn(buffer[line_count], "\r\n")] = 0;
+        char *buf = NULL;
+        size_t buf_sz = 0;
+        ssize_t n;
+        while ((n = getline(&buf, &buf_sz, fp)) != -1) {
+            /* Strip trailing newline */
+            while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r'))
+                buf[--n] = '\0';
+            if (!ensure_capacity(line_count + 1)) break;
+            lines[line_count] = xstrdup(buf);
             line_count++;
         }
-        if (line_count == MAX_LINES) {
-            char extra_check[2];
-            if (fgets(extra_check, sizeof(extra_check), fp) != NULL) {
-                snprintf(status_msg, sizeof(status_msg), "CRITICAL WARNING: File exceeds %d lines! Truncated to protect data.", MAX_LINES);
-            }
-        }
+        free(buf);
         fclose(fp);
+        if (line_count == 0) {
+            ensure_capacity(1);
+            lines[0] = xstrdup("");
+            line_count = 1;
+        }
         strncpy(current_filename, filename, sizeof(current_filename) - 1);
-        scroll_y = 0;
-        current_line = 0;
-        cursor_x = 0;
-        is_modified = 0;
+        scroll_y = 0; current_line = 0; cursor_x = 0; is_modified = 0;
     } else {
         strncpy(current_filename, filename, sizeof(current_filename) - 1);
+        ensure_capacity(1);
+        lines[0] = xstrdup("");
         line_count = 1;
-        buffer[0][0] = '\0';
         is_modified = 0;
     }
 }
 
-// 2. Interactive menu command when you press Ctrl+O
 void interactive_open() {
     char filename[256];
     int idx = 0;
     filename[0] = '\0';
     const char *prompt = "Enter filename to open (ESC to cancel): ";
     int prompt_len = strlen(prompt);
-
-    // Turn off automatic echo so our loop has 100% manual control over rendering
     noecho();
-
     mvprintw(LINES - 1, 0, "%s", prompt);
     clrtoeol();
     refresh();
-
     while (idx < (int)sizeof(filename) - 1) {
         int ch = getch();
-
-        if (ch == 27) { // ESC key caught instantly
-            status_msg[0] = '\0';
-            return;
-        }
-        else if (ch == 10 || ch == 13) { // Enter key finishes input
-            break;
-        }
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) { // Handle backspace
+        if (ch == 27) { status_msg[0] = '\0'; return; }
+        else if (ch == 10 || ch == 13) break;
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (idx > 0) {
-                idx--;
-                filename[idx] = '\0';
-                // Move back, wipe character visually, and step back again safely
+                idx--; filename[idx] = '\0';
                 mvprintw(LINES - 1, prompt_len + idx, " ");
-                move(LINES - 1, prompt_len + idx);
-                refresh();
+                move(LINES - 1, prompt_len + idx); refresh();
             }
-        }
-        else if (ch >= 32 && ch <= 126) { // Visible characters
-            filename[idx++] = (char)ch;
-            filename[idx] = '\0';
-            // Manually echo the character now that automatic echo is disabled
-            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch);
-            refresh();
+        } else if (ch >= 32 && ch <= 126) {
+            filename[idx++] = (char)ch; filename[idx] = '\0';
+            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch); refresh();
         }
     }
-
-    // Only load if the user actually typed a name
     if (strlen(filename) > 0) {
         FILE *fp = fopen(filename, "r");
-        if (fp) {
-            fclose(fp);
-            load_file(filename); // Pass it to our silent loader
-        } else {
+        if (fp) { fclose(fp); load_file(filename); }
+        else {
             mvprintw(LINES - 1, 0, "File not found! Press any key...");
-            clrtoeol();
-            refresh();
-            getch();
+            clrtoeol(); refresh(); getch();
         }
     }
-} // End interactive_open
+}
 
-// Function to handle the "Save" command
 void save_file() {
-    // If it's a new file (untitled), interactively prompt for a name
     if (strcmp(current_filename, "untitled.txt") == 0) {
         char filename[256];
-        echo();
-        noraw(); // Use noraw() instead of nocbreak() since we use raw() mode now
-
+        echo(); noraw();
         mvprintw(LINES - 1, 0, "Enter filename to save: ");
-        clrtoeol();
-        refresh();
-
+        clrtoeol(); refresh();
         getstr(filename);
-
-        noecho();
-        raw(); // Re-enable raw mode
-
-        if (strlen(filename) > 0) {
+        noecho(); raw();
+        if (strlen(filename) > 0)
             strncpy(current_filename, filename, 256);
-        } else {
-            return; // User hit enter without typing anything, cancel save
-        }
+        else return;
     }
-    // Now safely write out to current_filename (either loaded on start or typed above)
     FILE *fp = fopen(current_filename, "w");
     if (fp) {
         for (int i = 0; i < line_count; i++) {
-            int len = strlen(buffer[i]);
-            while (len > 0 && (buffer[i][len - 1] == ' ' || buffer[i][len - 1] == '\t')) {
-                buffer[i][--len] = '\0';
-            }
-            fprintf(fp, "%s\n", buffer[i]);
+            int len = strlen(lines[i]);
+            while (len > 0 && (lines[i][len-1] == ' ' || lines[i][len-1] == '\t'))
+                lines[i][--len] = '\0';
+            fprintf(fp, "%s\n", lines[i]);
         }
         fclose(fp);
-
-        // Remove swp file
         char swp_filename[300];
         snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", current_filename);
-        unlink(swp_filename); // Removes the swap file after a successful manual save
-
+        unlink(swp_filename);
         is_modified = 0;
-
-        memset(line_modified, 0, sizeof(line_modified));
-
+        tracker_clear();
         snprintf(status_msg, sizeof(status_msg), "Saved successfully to '%s'!", current_filename);
     } else {
         mvprintw(LINES - 1, 0, "Error: Could not save file! Press any key...");
-        clrtoeol();
-        refresh();
-        getch(); // Keep this one blocking because it's a critical error
+        clrtoeol(); refresh(); getch();
     }
-} // End save_file
+}
 
 void auto_save() {
     char swp_filename[300];
     snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", current_filename);
-
     FILE *fp = fopen(swp_filename, "w");
     if (fp) {
-        for (int i = 0; i < line_count; i++) {
-            fprintf(fp, "%s\n", buffer[i]);
-        }
+        for (int i = 0; i < line_count; i++)
+            fprintf(fp, "%s\n", lines[i]);
         fclose(fp);
     }
-} // End auto_save
+}
 
+/* ---------- screen rendering ---------- */
 void draw_screen() {
-    // REMOVED clear(); to prevent flicker
-
     start_color();
     init_pair(1, COLOR_YELLOW, COLOR_BLACK);
     init_pair(2, COLOR_RED, COLOR_BLACK);
@@ -336,35 +310,24 @@ void draw_screen() {
     init_pair(5, COLOR_GREEN, COLOR_BLACK);
     init_pair(6, COLOR_YELLOW, COLOR_BLACK);
 
-    move(0, 0);
-    clrtoeol();
+    move(0, 0); clrtoeol();
     attron(COLOR_PAIR(1));
-    if (is_modified) {
+    if (is_modified)
         printw(" File: %s * (unsaved) (%d lines)", current_filename, line_count);
-    } else {
+    else
         printw(" File: %s (%d lines)", current_filename, line_count);
-    }
     attroff(COLOR_PAIR(1));
 
-    move(1, 0);
-    clrtoeol();
-    for (int x = 0; x < COLS; x++) {
-        mvaddch(1, x, ACS_HLINE);
-    }
+    move(1, 0); clrtoeol();
+    for (int x = 0; x < COLS; x++) mvaddch(1, x, ACS_HLINE);
 
     int max_displayable_lines = LINES - 4;
     int physical_row = 2;
 
     for (int i = 0; i < max_displayable_lines; i++) {
         int file_line_index = scroll_y + i;
-
-        move(physical_row, 0);
-        clrtoeol();
-
-        if (file_line_index >= line_count) {
-            physical_row++;
-            continue;
-        }
+        move(physical_row, 0); clrtoeol();
+        if (file_line_index >= line_count) { physical_row++; continue; }
 
         if (file_line_index == current_line) {
             attron(COLOR_PAIR(1));
@@ -378,11 +341,10 @@ void draw_screen() {
             mvaddch(physical_row, 4, ACS_VLINE);
         }
 
-        char *line = buffer[file_line_index];
+        char *line = lines[file_line_index];
         int len = strlen(line);
         int in_string = 0;
         int in_char = 0;
-        int available_width = COLS - 6;
         int current_phys_row = physical_row;
         int current_phys_col = 6;
 
@@ -393,8 +355,7 @@ void draw_screen() {
             printw("%c", line[leading_space]);
             current_phys_col++;
             if (current_phys_col >= COLS) {
-                current_phys_row++;
-                current_phys_col = 6;
+                current_phys_row++; current_phys_col = 6;
                 move(current_phys_row, current_phys_col);
             }
             leading_space++;
@@ -402,21 +363,14 @@ void draw_screen() {
 
         for (int j = leading_space; j < len; j++) {
             if (current_phys_col >= COLS) {
-                current_phys_row++;
-                current_phys_col = 6;
+                current_phys_row++; current_phys_col = 6;
                 move(current_phys_row, current_phys_col);
             }
             if (j == leading_space && line[j] == '#') {
-                attron(COLOR_PAIR(3));
-                printw("%s", &line[j]);
-                attroff(COLOR_PAIR(3));
-                break;
+                attron(COLOR_PAIR(3)); printw("%s", &line[j]); attroff(COLOR_PAIR(3)); break;
             }
             if (!in_string && !in_char && line[j] == '/' && line[j+1] == '/') {
-                attron(COLOR_PAIR(5));
-                printw("%s", &line[j]);
-                attroff(COLOR_PAIR(5));
-                break;
+                attron(COLOR_PAIR(5)); printw("%s", &line[j]); attroff(COLOR_PAIR(5)); break;
             }
             if (line[j] == '\'' && !in_string) {
                 if (in_char) { printw("%c", line[j]); attroff(COLOR_PAIR(4)); in_char = 0; }
@@ -431,78 +385,51 @@ void draw_screen() {
             }
             if (in_string) { printw("%c", line[j]); current_phys_col++; continue; }
             if (j == 0 || (!isalnum((unsigned char)line[j-1]) && line[j-1] != '_')) {
-                char *keywords[] = {"if", "else", "while", "for", "return", "break", "continue", "switch", "case", "default", "int", "char", "void", "struct", "typedef", "double", "float", "long", "short", "unsigned", "static", "const", "extern", "sizeof"};
+                const char *keywords[] = {"if","else","while","for","return","break",
+                    "continue","switch","case","default","int","char","void","struct",
+                    "typedef","double","float","long","short","unsigned","static",
+                    "const","extern","sizeof"};
                 int matched = 0;
                 for (int k = 0; k < 24; k++) {
                     int kw_len = strlen(keywords[k]);
-                    if (strncmp(&line[j], keywords[k], kw_len) == 0 && !isalnum((unsigned char)line[j + kw_len]) && line[j + kw_len] != '_') {
-                        attron(COLOR_PAIR(3));
+                    if (strncmp(&line[j], keywords[k], kw_len) == 0 &&
+                        !isalnum((unsigned char)line[j + kw_len]) &&
+                        line[j + kw_len] != '_') {
+                        attron(COLOR_PAIR(2));
                         for (int m = 0; m < kw_len; m++) {
-                            if (current_phys_col >= COLS) { current_phys_row++; current_phys_col = 6; move(current_phys_row, current_phys_col); }
-                            printw("%c", keywords[k][m]); current_phys_col++;
+                            printw("%c", line[j + m]);
+                            current_phys_col++;
+                            if (current_phys_col >= COLS) {
+                                current_phys_row++; current_phys_col = 6;
+                                move(current_phys_row, current_phys_col);
+                            }
                         }
-                        attroff(COLOR_PAIR(3));
-                        j += (kw_len - 1); matched = 1; break;
+                        attroff(COLOR_PAIR(2));
+                        j += kw_len - 1;
+                        matched = 1;
+                        break;
                     }
                 }
                 if (matched) continue;
             }
-            if (isdigit((unsigned char)line[j])) { attron(COLOR_PAIR(4)); printw("%c", line[j]); attroff(COLOR_PAIR(4)); }
-            else if (tracker_is_modified(file_line_index, j)) { attron(COLOR_PAIR(1)); printw("%c", line[j]); attroff(COLOR_PAIR(1)); }
-            else { printw("%c", line[j]); }
+            printw("%c", line[j]);
             current_phys_col++;
         }
-        int lines_consumed = 1 + (len / available_width);
-        physical_row += lines_consumed;
+        physical_row = current_phys_row + 1;
     }
 
-    while (physical_row < LINES - 2) {
-        move(physical_row, 0);
-        clrtoeol();
-        physical_row++;
-    }
-
-    move(LINES - 2, 0);
-    clrtoeol();
+    /* Status bar */
+    move(LINES - 2, 0); clrtoeol();
     for (int x = 0; x < COLS; x++) mvaddch(LINES - 2, x, ACS_HLINE);
+    move(LINES - 1, 0); clrtoeol();
+    attron(COLOR_PAIR(3));
+    printw(" %s", status_msg);
+    attroff(COLOR_PAIR(3));
 
-    move(LINES - 1, 0);
-    clrtoeol();
-    if (strlen(status_msg) > 0) {
-        attron(COLOR_PAIR(1));
-        mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
-        attroff(COLOR_PAIR(1));
-    } else {
-        if (!is_modified) mvprintw(LINES - 1, 0, "qi text editor, v.%s (c) 2026, Christopher Camacho | Cur: %d/%d | (^? for Help)", VERSION, current_line + 1, cursor_x + 1);
-        else {
-            int total_chars = 0, modified_chars = 0, modified_lines = 0;
-            for (int i = 0; i < line_count; i++) {
-                int len = strlen(buffer[i]);
-                total_chars += len;
-                int line_has_mod = 0;
-                for (int j = 0; j < len; j++) { if (tracker_is_modified(i, j)) { modified_chars++; line_has_mod = 1; } }
-                if (line_has_mod) modified_lines++;
-            }
-            mvprintw(LINES - 1, 0, "Lines Mod: %d | Chars Mod: %d | Total Chars: %d | Cur: %d/%d | (^? for Help)", modified_lines, modified_chars, total_chars, current_line + 1, cursor_x + 1);
-        }
-    }
-
-    // --- ADD SOLID VERTICAL MARGIN LINE AT COLUMN 81 ---
-    if (COLS > 81) {
-        for (int r = 2; r < LINES - 2; r++) {
-            chtype ch_at = mvinch(r, 81);
-            // Only draw if the position is empty (space) to avoid overwriting text
-            if ((ch_at & A_CHARTEXT) == ' ') {
-                attron(A_DIM);
-                mvaddch(r, 81, ACS_VLINE);
-                attroff(A_DIM);
-            }
-        }
-    }
-
+    /* Cursor placement */
     int cursor_physical_row = 2;
     for (int i = scroll_y; i < current_line; i++) {
-        int l_len = strlen(buffer[i]);
+        int l_len = strlen(lines[i]);
         int l_rows = (l_len / (COLS - 6)) + 1;
         cursor_physical_row += (l_len == 0) ? 1 : l_rows;
     }
@@ -513,137 +440,17 @@ void draw_screen() {
     else move(LINES - 3, COLS - 1);
 
     refresh();
-} // End draw_screen
+}
 
+/* ---------- find / replace ---------- */
 void find_text() {
     char search_str[128];
     int idx = 0;
     search_str[0] = '\0';
     const char *prompt = "Find: ";
     int prompt_len = strlen(prompt);
-
-    // Force noecho() so backspace operations wipe clean manually
     noecho();
-    mvprintw(LINES - 1, 0, "%s", prompt);
-    clrtoeol();
-    refresh();
-
-    while (idx < (int)sizeof(search_str) - 1) {
-        int ch = getch();
-        if (ch == 27) { // ESC
-            status_msg[0] = '\0';
-            return;
-        }
-        else if (ch == 10 || ch == 13) { // Enter
-            break;
-        }
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) { // Backspace
-            if (idx > 0) {
-                idx--;
-                search_str[idx] = '\0';
-                mvprintw(LINES - 1, prompt_len + idx, " ");
-                move(LINES - 1, prompt_len + idx);
-                refresh();
-            }
-        }
-        else if (ch >= 32 && ch <= 126) { // Visible characters
-            search_str[idx++] = (char)ch;
-            search_str[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch);
-            refresh();
-        }
-    }
-
-    if (strlen(search_str) == 0) return;
-
-    // Structure to hold coordinates of matches
-    struct { int line; int col; } matches[500];
-    int match_count = 0;
-    int current_match_idx = 0;
-
-    // Scan entire file buffer for occurrences
-    for (int i = 0; i < line_count; i++) {
-        char lower_line[MAX_LINE_LEN];
-        char lower_search[128];
-
-        // Convert both strings to lowercase for comparison
-        for (int j = 0; buffer[i][j] && j < MAX_LINE_LEN - 1; j++)
-            lower_line[j] = tolower((unsigned char)buffer[i][j]);
-        lower_line[strlen(buffer[i])] = '\0';
-
-        for (int j = 0; search_str[j] && j < 127; j++)
-            lower_search[j] = tolower((unsigned char)search_str[j]);
-        lower_search[strlen(search_str)] = '\0';
-
-        char *ptr = lower_line;
-        while ((ptr = strstr(ptr, lower_search)) != NULL) {
-            if (match_count < 500) {
-                matches[match_count].line = i;
-                matches[match_count].col = (int)(ptr - lower_line);
-                match_count++;
-            }
-            ptr++; // Move forward to catch overlapping matches
-        }
-    }
-
-    if (match_count == 0) {
-        snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str);
-        return;
-    }
-
-    // Interactive Navigation Loop
-    while (1) {
-        current_line = matches[current_match_idx].line;
-        cursor_x = matches[current_match_idx].col;
-
-        int max_displayable_lines = LINES - 4;
-        scroll_y = current_line - (max_displayable_lines / 2);
-        if (scroll_y < 0) scroll_y = 0;
-        if (scroll_y > line_count - max_displayable_lines) {
-            scroll_y = line_count - max_displayable_lines;
-        }
-        if (scroll_y < 0) scroll_y = 0;
-
-        draw_screen();
-        snprintf(status_msg, sizeof(status_msg),
-                 "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]",
-                 current_match_idx + 1, match_count);
-        draw_screen();
-
-        int ch = getch();
-        if (ch == 10 || ch == 13) {
-            snprintf(status_msg, sizeof(status_msg), "Found match at line %d.", current_line + 1);
-            break;
-        }
-        else if (ch == 27) {
-            status_msg[0] = '\0';
-            break;
-        }
-        else if (ch == KEY_RIGHT || ch == KEY_DOWN) {
-            current_match_idx = (current_match_idx + 1) % match_count;
-        }
-        else if (ch == KEY_LEFT || ch == KEY_UP) {
-            current_match_idx = (current_match_idx - 1 + match_count) % match_count;
-        }
-    }
-} // End find_text
-
-void replace_text() {
-    char search_str[128];
-    char replace_str[128];
-    int idx = 0;
-    search_str[0] = '\0';
-    replace_str[0] = '\0';
-
-    noecho();
-
-    // Prompt 1: Find text
-    const char *prompt1 = "Find text to replace: ";
-    int p1_len = strlen(prompt1);
-    mvprintw(LINES - 1, 0, "%s", prompt1);
-    clrtoeol();
-    refresh();
-
+    mvprintw(LINES - 1, 0, "%s", prompt); clrtoeol(); refresh();
     while (idx < (int)sizeof(search_str) - 1) {
         int ch = getch();
         if (ch == 27) { status_msg[0] = '\0'; return; }
@@ -651,77 +458,115 @@ void replace_text() {
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (idx > 0) {
                 idx--; search_str[idx] = '\0';
-                mvprintw(LINES - 1, p1_len + idx, " ");
-                move(LINES - 1, p1_len + idx); refresh();
+                mvprintw(LINES - 1, prompt_len + idx, " ");
+                move(LINES - 1, prompt_len + idx); refresh();
             }
-        }
-        else if (ch >= 32 && ch <= 126) {
+        } else if (ch >= 32 && ch <= 126) {
             search_str[idx++] = (char)ch; search_str[idx] = '\0';
-            mvprintw(LINES - 1, p1_len + idx - 1, "%c", ch); refresh();
+            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch); refresh();
         }
     }
     if (strlen(search_str) == 0) return;
 
-    // Prompt 2: Replace with
+    struct { int line; int col; } matches[500];
+    int match_count = 0, current_match_idx = 0;
+
+    for (int i = 0; i < line_count; i++) {
+        char lower_line[MAX_LINE_LEN], lower_search[128];
+        int ll = strlen(lines[i]);
+        if (ll >= MAX_LINE_LEN) ll = MAX_LINE_LEN - 1;
+        for (int j = 0; j < ll; j++)
+            lower_line[j] = tolower((unsigned char)lines[i][j]);
+        lower_line[ll] = '\0';
+        int sl = strlen(search_str);
+        for (int j = 0; j < sl && j < 127; j++)
+            lower_search[j] = tolower((unsigned char)search_str[j]);
+        lower_search[sl] = '\0';
+        char *ptr = lower_line;
+        while ((ptr = strstr(ptr, lower_search)) != NULL) {
+            if (match_count < 500) {
+                matches[match_count].line = i;
+                matches[match_count].col = (int)(ptr - lower_line);
+                match_count++;
+            }
+            ptr++;
+        }
+    }
+    if (match_count == 0) {
+        snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str);
+        return;
+    }
+    while (1) {
+        current_line = matches[current_match_idx].line;
+        cursor_x = matches[current_match_idx].col;
+        int max_displayable_lines = LINES - 4;
+        scroll_y = current_line - (max_displayable_lines / 2);
+        if (scroll_y < 0) scroll_y = 0;
+        if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
+        if (scroll_y < 0) scroll_y = 0;
+        draw_screen();
+        snprintf(status_msg, sizeof(status_msg),
+                 "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]",
+                 current_match_idx + 1, match_count);
+        draw_screen();
+        int ch = getch();
+        if (ch == 10 || ch == 13) {
+            snprintf(status_msg, sizeof(status_msg), "Found match at line %d.", current_line + 1); break;
+        } else if (ch == 27) { status_msg[0] = '\0'; break; }
+        else if (ch == KEY_RIGHT || ch == KEY_DOWN) current_match_idx = (current_match_idx + 1) % match_count;
+        else if (ch == KEY_LEFT || ch == KEY_UP) current_match_idx = (current_match_idx - 1 + match_count) % match_count;
+    }
+}
+
+void replace_text() {
+    char search_str[128], replace_str[128];
+    int idx = 0;
+    search_str[0] = replace_str[0] = '\0';
+    noecho();
+
+    const char *prompt1 = "Find text to replace: ";
+    int p1_len = strlen(prompt1);
+    mvprintw(LINES - 1, 0, "%s", prompt1); clrtoeol(); refresh();
+    while (idx < (int)sizeof(search_str) - 1) {
+        int ch = getch();
+        if (ch == 27) { status_msg[0] = '\0'; return; }
+        else if (ch == 10 || ch == 13) break;
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (idx > 0) { idx--; search_str[idx] = '\0'; mvprintw(LINES-1,p1_len+idx," "); move(LINES-1,p1_len+idx); refresh(); }
+        } else if (ch >= 32 && ch <= 126) { search_str[idx++]=(char)ch; search_str[idx]='\0'; mvprintw(LINES-1,p1_len+idx-1,"%c",ch); refresh(); }
+    }
+    if (strlen(search_str) == 0) return;
+
     idx = 0;
     const char *prompt2 = "Replace with: ";
     int p2_len = strlen(prompt2);
-    mvprintw(LINES - 1, 0, "%s", prompt2);
-    clrtoeol();
-    refresh();
-
+    mvprintw(LINES - 1, 0, "%s", prompt2); clrtoeol(); refresh();
     while (idx < (int)sizeof(replace_str) - 1) {
         int ch = getch();
         if (ch == 27) { status_msg[0] = '\0'; return; }
         else if (ch == 10 || ch == 13) break;
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) {
-                idx--; replace_str[idx] = '\0';
-                mvprintw(LINES - 1, p2_len + idx, " ");
-                move(LINES - 1, p2_len + idx); refresh();
-            }
-        }
-        else if (ch >= 32 && ch <= 126) {
-            replace_str[idx++] = (char)ch; replace_str[idx] = '\0';
-            mvprintw(LINES - 1, p2_len + idx - 1, "%c", ch); refresh();
-        }
+            if (idx > 0) { idx--; replace_str[idx]='\0'; mvprintw(LINES-1,p2_len+idx," "); move(LINES-1,p2_len+idx); refresh(); }
+        } else if (ch >= 32 && ch <= 126) { replace_str[idx++]=(char)ch; replace_str[idx]='\0'; mvprintw(LINES-1,p2_len+idx-1,"%c",ch); refresh(); }
     }
 
-    // 3. Collect Match Coordinates
     struct { int line; int col; } matches[500];
     int match_count = 0;
-
     for (int i = 0; i < line_count; i++) {
-        char *ptr = buffer[i];
+        char *ptr = lines[i];
         while ((ptr = strstr(ptr, search_str)) != NULL) {
-            if (match_count < 500) {
-                matches[match_count].line = i;
-                matches[match_count].col = (int)(ptr - buffer[i]);
-                match_count++;
-            }
-            ptr += strlen(search_str); // Advance past this match
+            if (match_count < 500) { matches[match_count].line = i; matches[match_count].col = (int)(ptr - lines[i]); match_count++; }
+            ptr += strlen(search_str);
         }
     }
-
-    if (match_count == 0) {
-        snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str);
-        return;
-    }
+    if (match_count == 0) { snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str); return; }
 
     save_undo_state_single(current_line);
-
-    int current_idx = 0;
-    int replaced_count = 0;
-    int force_all = 0;
-
-    // 4. Interactive Replace Loop
+    int current_idx = 0, replaced_count = 0, force_all = 0;
     while (current_idx < match_count) {
-        int line = matches[current_idx].line;
+        int ln = matches[current_idx].line;
         int col = matches[current_idx].col;
-
-        // Snap view to match
-        current_line = line;
-        cursor_x = col;
+        current_line = ln; cursor_x = col;
         int max_displayable_lines = LINES - 4;
         scroll_y = current_line - (max_displayable_lines / 2);
         if (scroll_y < 0) scroll_y = 0;
@@ -731,188 +576,102 @@ void replace_text() {
             snprintf(status_msg, sizeof(status_msg),
                      "Match %d of %d: Replace? (y: Yes | n: No | a: All | q: Quit/ESC)",
                      current_idx + 1, match_count);
-            draw_screen();
-            choice = getch();
-        } else {
-            choice = 'y';
-        }
+            draw_screen(); choice = getch();
+        } else { choice = 'y'; }
 
-        if (choice == 'q' || choice == 27) {
-            break;
-        }
-        else if (choice == 'a') {
-            force_all = 1;
-            choice = 'y';
-        }
-
+        if (choice == 'q' || choice == 27) break;
+        if (choice == 'a') { force_all = 1; choice = 'y'; }
         if (choice == 'y') {
-            char temp[MAX_LINE_LEN] = "";
             int search_len = strlen(search_str);
             int replace_len = strlen(replace_str);
-
-            if (strlen(buffer[line]) - search_len + replace_len < MAX_LINE_LEN) {
-                strncpy(temp, buffer[line], col);
-                temp[col] = '\0';
-                strcat(temp, replace_str);
-                strcat(temp, &buffer[line][col + search_len]);
-                strcpy(buffer[line], temp);
-
+            int old_len = strlen(lines[ln]);
+            int new_len = old_len - search_len + replace_len;
+            char *tmp = malloc(new_len + 1);
+            if (tmp) {
+                memcpy(tmp, lines[ln], col);
+                memcpy(tmp + col, replace_str, replace_len);
+                memcpy(tmp + col + replace_len, lines[ln] + col + search_len,
+                       old_len - col - search_len + 1);
+                free(lines[ln]); lines[ln] = tmp;
                 replaced_count++;
-
                 int delta = replace_len - search_len;
-                for (int j = current_idx + 1; j < match_count; j++) {
-                    if (matches[j].line == line) {
-                        matches[j].col += delta;
-                    } else {
-                        break;
-                    }
-                }
+                for (int j = current_idx + 1; j < match_count && matches[j].line == ln; j++)
+                    matches[j].col += delta;
             }
         }
         current_idx++;
     }
-
-    if (replaced_count > 0) {
-        snprintf(status_msg, sizeof(status_msg), "Replaced %s with %s (%d instances%s)", search_str, replace_str, replaced_count, replaced_count == 1 ? "" : "s");
-    } else {
+    if (replaced_count > 0)
+        snprintf(status_msg, sizeof(status_msg), "Replaced %s with %s (%d instance%s)",
+                 search_str, replace_str, replaced_count, replaced_count == 1 ? "" : "s");
+    else
         snprintf(status_msg, sizeof(status_msg), "No replacements made.");
-    }
-} // End replace_text
+}
 
+/* ---------- goto line ---------- */
 void goto_line() {
-    char line_input[32];
-    int idx = 0;
-    line_input[0] = '\0';
-    const char *prompt = "Go to line: ";
-    int prompt_len = strlen(prompt);
-
-    echo();
-    mvprintw(LINES - 1, 0, "%s", prompt);
-    clrtoeol();
-    refresh();
-
+    char line_input[32]; int idx = 0; line_input[0] = '\0';
+    const char *prompt = "Go to line: "; int prompt_len = strlen(prompt);
+    echo(); mvprintw(LINES-1,0,"%s",prompt); clrtoeol(); refresh();
     while (idx < (int)sizeof(line_input) - 1) {
         int ch = getch();
-        if (ch == 27) { // ESC
-            noecho();
-            status_msg[0] = '\0';
-            return;
-        }
-        else if (ch == 10 || ch == 13) { // Enter
-            break;
-        }
+        if (ch == 27) { noecho(); status_msg[0]='\0'; return; }
+        else if (ch == 10 || ch == 13) break;
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) {
-                idx--;
-                line_input[idx] = '\0';
-                mvprintw(LINES - 1, prompt_len + idx, " ");
-                move(LINES - 1, prompt_len + idx);
-                refresh();
-            }
-        }
-        else if (ch >= 32 && ch <= 126) {
-            // Only accept digits for Go To Line configuration
-            if (isdigit((unsigned char)ch)) {
-                line_input[idx++] = (char)ch;
-                line_input[idx] = '\0';
-            }
-        }
+            if (idx > 0) { idx--; line_input[idx]='\0'; mvprintw(LINES-1,prompt_len+idx," "); move(LINES-1,prompt_len+idx); refresh(); }
+        } else if (isdigit((unsigned char)ch)) { line_input[idx++]=(char)ch; line_input[idx]='\0'; }
     }
     noecho();
-
     if (strlen(line_input) == 0) return;
-
     int target = atoi(line_input);
-
     if (target < 1 || target > line_count) {
-        snprintf(status_msg, sizeof(status_msg), "Line %d out of bounds! (Total lines: %d)", target, line_count);
-        return;
+        snprintf(status_msg, sizeof(status_msg), "Line %d out of bounds! (Total lines: %d)", target, line_count); return;
     }
-
-    current_line = target - 1;
-    cursor_x = 0;
-
+    current_line = target - 1; cursor_x = 0;
     int max_displayable_lines = LINES - 4;
     scroll_y = current_line - (max_displayable_lines / 2);
-
     if (scroll_y < 0) scroll_y = 0;
-    if (scroll_y > line_count - max_displayable_lines) {
-        scroll_y = line_count - max_displayable_lines;
-        if (scroll_y < 0) scroll_y = 0;
-    }
-} // End goto_line
+    if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
+    if (scroll_y < 0) scroll_y = 0;
+}
 
+/* ---------- delete lines ---------- */
 void delete_lines_interactive() {
-    char input[256];
-    int idx = 0;
-    input[0] = '\0';
-    const char *prompt = "Delete lines (e.g., 3, 5, 10-25): ";
-    int prompt_len = strlen(prompt);
-
-    echo();
-    mvprintw(LINES - 1, 0, "%s", prompt);
-    clrtoeol();
-    refresh();
-
+    char input[256]; int idx = 0; input[0] = '\0';
+    const char *prompt = "Delete lines (e.g., 3, 5, 10-25): "; int prompt_len = strlen(prompt);
+    echo(); mvprintw(LINES-1,0,"%s",prompt); clrtoeol(); refresh();
     while (idx < (int)sizeof(input) - 1) {
         int ch = getch();
-        if (ch == 27) { // ESC
-            noecho();
-            status_msg[0] = '\0';
-            return;
-        }
-        else if (ch == 10 || ch == 13) { // Enter
-            break;
-        }
+        if (ch == 27) { noecho(); status_msg[0]='\0'; return; }
+        else if (ch == 10 || ch == 13) break;
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) {
-                idx--;
-                input[idx] = '\0';
-                mvprintw(LINES - 1, prompt_len + idx, " ");
-                move(LINES - 1, prompt_len + idx);
-                refresh();
-            }
-        }
-        else if (ch >= 32 && ch <= 126) {
-            input[idx++] = (char)ch;
-            input[idx] = '\0';
-        }
+            if (idx > 0) { idx--; input[idx]='\0'; mvprintw(LINES-1,prompt_len+idx," "); move(LINES-1,prompt_len+idx); refresh(); }
+        } else if (ch >= 32 && ch <= 126) { input[idx++]=(char)ch; input[idx]='\0'; }
     }
     noecho();
-
     if (strlen(input) == 0) return;
 
-    // Save a clean copy of the user's raw input string before strtok cuts it up
     char saved_input_copy[256];
     strncpy(saved_input_copy, input, sizeof(saved_input_copy) - 1);
-    saved_input_copy[sizeof(saved_input_copy) - 1] = '\0';
+    saved_input_copy[sizeof(saved_input_copy)-1] = '\0';
 
-    char to_delete[MAX_LINES];
-    memset(to_delete, 0, sizeof(to_delete));
+    /* Build deletion bitmap — use heap to avoid VLA issues on large files */
+    char *to_delete = calloc(line_count, sizeof(char));
+    if (!to_delete) return;
 
     save_undo_state_batch(0, line_count);
 
     char *token = strtok(input, ",");
     while (token != NULL) {
         while (*token == ' ') token++;
-
         char *dash = strchr(token, '-');
-        if (dash != NULL) {
-            int start = atoi(token);
-            int end = atoi(dash + 1);
-
-            if (start > 0 && end >= start) {
-                for (int i = start; i <= end; i++) {
-                    if (i <= line_count) {
-                        to_delete[i - 1] = 1;
-                    }
-                }
-            }
+        if (dash) {
+            int start = atoi(token), end = atoi(dash + 1);
+            if (start > 0 && end >= start)
+                for (int i = start; i <= end && i <= line_count; i++) to_delete[i-1] = 1;
         } else {
-            int line_num = atoi(token);
-            if (line_num > 0 && line_num <= line_count) {
-                to_delete[line_num - 1] = 1;
-            }
+            int ln = atoi(token);
+            if (ln > 0 && ln <= line_count) to_delete[ln-1] = 1;
         }
         token = strtok(NULL, ",");
     }
@@ -920,108 +679,74 @@ void delete_lines_interactive() {
     int deleted_count = 0;
     for (int i = line_count - 1; i >= 0; i--) {
         if (to_delete[i]) {
-            for (int j = i; j < line_count - 1; j++) {
-                strcpy(buffer[j], buffer[j + 1]);
-            }
-            buffer[line_count - 1][0] = '\0';
-            line_count--;
+            remove_line_at(i);
             deleted_count++;
-
-            if (i <= current_line && current_line > 0) {
-                current_line--;
-            }
+            if (i <= current_line && current_line > 0) current_line--;
         }
     }
+    free(to_delete);
 
     if (line_count == 0) {
-        line_count = 1;
-        buffer[0][0] = '\0';
-        current_line = 0;
-        cursor_x = 0;
+        ensure_capacity(1); lines[0] = xstrdup(""); line_count = 1;
+        current_line = 0; cursor_x = 0;
     }
-
-    int len = strlen(buffer[current_line]);
+    int len = strlen(lines[current_line]);
     if (cursor_x > len) cursor_x = len;
-
     int max_displayable_lines = LINES - 4;
-    if (scroll_y > line_count - max_displayable_lines) {
-        scroll_y = line_count - max_displayable_lines;
-    }
+    if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
     if (scroll_y < 0) scroll_y = 0;
 
-    if (deleted_count > 0) {
+    if (deleted_count > 0)
         snprintf(status_msg, sizeof(status_msg), "Deleted lines %s", saved_input_copy);
-    } else {
+    else
         snprintf(status_msg, sizeof(status_msg), "No lines deleted.");
-    }
-} // End delete_lines_interactive
+}
 
+/* ---------- help window ---------- */
 void show_help_window() {
-    // 1. Calculate dimensions and centering
-    int height = 18;
-    int width = 50;
+    int height = 18, width = 50;
     int start_y = (LINES - height) / 2;
     int start_x = (COLS - width) / 2;
-
-    // 2. Create the window
     WINDOW *help_win = newwin(height, width, start_y, start_x);
-
-    // Allow the window to catch all keypad inputs seamlessly
     keypad(help_win, TRUE);
-
-    // 3. Draw the thin ANSI/NCURSES box borders
-    // Arguments: win, vline, hline
     box(help_win, 0, 0);
-
-    // 4. Render the command list content
-    const char *header = "--- qi text editor help ---";
-    int string_length = 27;
-    int header_x = (width - string_length) / 2;
-
-    mvwprintw(help_win, 1, header_x, "%s", header);
-    mvwprintw(help_win, 3, 4, "^O  Open File");
-    mvwprintw(help_win, 4, 4, "^W  Save File");
-    mvwprintw(help_win, 5, 4, "^F  Find Text");
-    mvwprintw(help_win, 6, 4, "^R  Replace Text");
-    mvwprintw(help_win, 7, 4, "^G  Go To Line");
-    mvwprintw(help_win, 8, 4, "^D  Delete Line(s)");
-    mvwprintw(help_win, 9, 4, "^U  Undo Action");
-    mvwprintw(help_win, 10, 4, "^T Jump to Start of File");
-    mvwprintw(help_win, 11, 4, "^B Jump to End of File");
-    mvwprintw(help_win, 12, 4, "^X Toggle Insert/Overwrite Modes");
-    mvwprintw(help_win, 13, 4, "^Q Quit Editor");
-
-    mvwprintw(help_win, 15, (width - 24) / 2, "Press any key to close");
-
-    // 5. Refresh to show the popup overlay
+    wattron(help_win, COLOR_PAIR(1) | A_BOLD);
+    mvwprintw(help_win, 0, (width - 10) / 2, " qi v%s ", VERSION);
+    wattroff(help_win, COLOR_PAIR(1) | A_BOLD);
+    const char *help[] = {
+        "Ctrl+W  Save file",
+        "Ctrl+O  Open file",
+        "Ctrl+Q  Quit",
+        "Ctrl+F  Find text",
+        "Ctrl+R  Find & Replace",
+        "Ctrl+G  Go to line",
+        "Ctrl+U  Undo",
+        "Ctrl+D  Delete line(s)",
+        "Ctrl+X  Toggle Insert/Overwrite",
+        "Ctrl+T  Top of file",
+        "Ctrl+B  Bottom of file",
+        "Ctrl+?  This help screen",
+        "",
+        "Press any key to close..."
+    };
+    for (int i = 0; i < 14; i++)
+        mvwprintw(help_win, 2 + i, 2, "%s", help[i]);
     wrefresh(help_win);
-
-    // 6. Wait for a keypress to dismiss
     wgetch(help_win);
-
-    // 7. Clean up memory and remove the window
     delwin(help_win);
-
-    // 8. Force standard screen to redraw over the cleared popup area
     touchwin(stdscr);
     refresh();
-} // End show_help_window
+}
 
+/* ---------- main ---------- */
 int main(int argc, char *argv[]) {
-
-    // 1. First, configure low-level TTY flow control
     struct termios tty;
     if (tcgetattr(STDIN_FILENO, &tty) == 0) {
         tty.c_iflag &= ~IXON;
         tcsetattr(STDIN_FILENO, TCSANOW, &tty);
     }
+    printf("\e[?2004l"); fflush(stdout);
 
-    // --- FORCE DISABLE TERMINAL BRACKETED PASTE MODE ---
-    // This stops modern terminals from wrapping your pastes in escape characters.
-    printf("\e[?2004l");
-    fflush(stdout);
-
-    // 2. Initialize ncurses completely
     initscr();
     set_escdelay(25);
     raw();
@@ -1031,46 +756,33 @@ int main(int argc, char *argv[]) {
     noecho();
     curs_set(1);
 
-    // Start tracking
-    tracker_init(MAX_LINES, MAX_LINE_LEN);
+    /* Initialise tracker with a modest hint; it only uses 1 byte per line */
+    tracker_init(1024, 1);
 
-    // Explicitly zero out the undo stack structure
     memset(undo_stack, 0, sizeof(undo_stack));
 
-    // Check if a filename argument was provided
+    /* Bootstrap with one empty line */
+    ensure_capacity(1);
+    lines[0] = xstrdup("");
+    line_count = 1;
+
     if (argc > 1) {
         load_file(argv[1]);
-        if (argc > 2) {
-            // Check if the second argument begins with '+' or ':'
-            if (argv[2][0] == '+' || argv[2][0] == ':') {
-                // Convert the string numbers past the prefix into an integer
-                int target_line = atoi(&argv[2][1]);
-
-                // Ensure the target line falls inside your actual file bounds
-                if (target_line > 0 && target_line <= line_count) {
-                    current_line = target_line - 1;
-                    cursor_x = 0;
-
-                    // Dynamically position the screen viewport to center the line
-                    int max_displayable_lines = LINES - 4;
-                    scroll_y = current_line - (max_displayable_lines / 2);
-
-                    if (scroll_y < 0) scroll_y = 0;
-                    if (scroll_y > line_count - max_displayable_lines) {
-                        scroll_y = line_count - max_displayable_lines;
-                        if (scroll_y < 0) scroll_y = 0;
-                    }
-                }
+        if (argc > 2 && (argv[2][0] == '+' || argv[2][0] == ':')) {
+            int target_line = atoi(&argv[2][1]);
+            if (target_line > 0 && target_line <= line_count) {
+                current_line = target_line - 1; cursor_x = 0;
+                int max_displayable_lines = LINES - 4;
+                scroll_y = current_line - (max_displayable_lines / 2);
+                if (scroll_y < 0) scroll_y = 0;
+                if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
+                if (scroll_y < 0) scroll_y = 0;
             }
         }
     } else {
-        // Default name if no argument is passed
         strcpy(current_filename, "untitled.txt");
-        line_count = 1;
-        buffer[0][0] = '\0';
     }
 
-    #include <time.h> // Ensure time.h is included at top of file
     clock_t last_input_time = 0;
     int paste_batch_active = 0;
 
@@ -1082,16 +794,12 @@ int main(int argc, char *argv[]) {
         double ms_since_last = ((double)(now - last_input_time) / CLOCKS_PER_SEC) * 1000.0;
         last_input_time = now;
 
-        // If characters/newlines are hitting the loop under 4ms apart, it's a massive paste
         if (ms_since_last < 4.0 && ch != CTRL_KEY('u') && last_input_time != 0) {
             if (!paste_batch_active) {
-                // We just realized a fast paste sequence started!
-                // Snapshot the editor state starting from the current line
                 save_undo_state_batch(current_line, line_count - current_line);
                 paste_batch_active = 1;
             }
         } else {
-            // Stream slowed down; paste has finished
             paste_batch_active = 0;
         }
 
@@ -1099,23 +807,15 @@ int main(int argc, char *argv[]) {
 
         if (ch == CTRL_KEY('q')) {
             if (is_modified) {
-                move(LINES - 1, 0);
-                clrtoeol();
-
-                attron(COLOR_PAIR(2)); // --- TURN ON RED ---
+                move(LINES-1,0); clrtoeol();
+                attron(COLOR_PAIR(2));
                 printw("Unsaved changes! Quit anyway? (y/n): ");
-                attroff(COLOR_PAIR(2)); // --- TURN OFF RED ---
-
+                attroff(COLOR_PAIR(2));
                 refresh();
                 int confirm = getch();
-                if (confirm == 'y' || confirm == 'Y') {
-                    break;
-                } else {
-                    continue; // Skip the rest of the loop and redraw the screen safely
-                }
-            } else {
-                break; // No changes, exit immediately
-            }
+                if (confirm == 'y' || confirm == 'Y') break;
+                else continue;
+            } else break;
         }
         else if (ch == CTRL_KEY('o')) interactive_open();
         else if (ch == CTRL_KEY('w')) save_file();
@@ -1129,362 +829,241 @@ int main(int argc, char *argv[]) {
             overwrite_mode = !overwrite_mode;
             snprintf(status_msg, sizeof(status_msg), "Mode: %s", overwrite_mode ? "OVERWRITE" : "INSERT");
         }
-        else if (ch == CTRL_KEY('t')) { // Top of file
-            current_line = 0;
-            cursor_x = 0;
-            scroll_y = 0;
-        }
-        else if (ch == CTRL_KEY('b')) { // Bottom of file
-            current_line = line_count - 1;
-            cursor_x = 0;
+        else if (ch == CTRL_KEY('t')) { current_line = 0; cursor_x = 0; scroll_y = 0; }
+        else if (ch == CTRL_KEY('b')) {
+            current_line = line_count - 1; cursor_x = 0;
             int max_displayable_lines = LINES - 4;
             scroll_y = current_line - max_displayable_lines + 1;
             if (scroll_y < 0) scroll_y = 0;
         }
-
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-
-                // --- VISUAL SCROLLOFF: Calculate real visual row gap ---
                 int available_width = COLS - 6;
                 int visual_rows_above = 0;
-
                 for (int i = scroll_y; i < current_line; i++) {
-                    int l_len = strlen(buffer[i]);
-                    int l_rows = (l_len / available_width) + 1;
-                    if (l_len == 0) l_rows = 1;
-                    visual_rows_above += l_rows;
+                    int l_len = strlen(lines[i]);
+                    visual_rows_above += (l_len == 0) ? 1 : (l_len / available_width) + 1;
                 }
-
-                // If our active target line is within 3 visual rows of the top view boundary
                 if (visual_rows_above < 3 && scroll_y > 0) {
-                    // Slide the camera up by array elements until we clear the visual buffer zone
                     while (scroll_y > 0 && visual_rows_above < 3) {
                         scroll_y--;
-
-                        // Recalculate visual row gap with updated scroll_y
                         visual_rows_above = 0;
                         for (int i = scroll_y; i < current_line; i++) {
-                            int l_len = strlen(buffer[i]);
-                            int l_rows = (l_len / available_width) + 1;
-                            if (l_len == 0) l_rows = 1;
-                            visual_rows_above += l_rows;
+                            int l_len = strlen(lines[i]);
+                            visual_rows_above += (l_len == 0) ? 1 : (l_len / available_width) + 1;
                         }
                     }
                 }
-
-                int len = strlen(buffer[current_line]);
+                int len = strlen(lines[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
-
-        } else if (ch == KEY_DOWN) {
+        }
+        else if (ch == KEY_DOWN) {
             if (current_line < line_count - 1) {
                 current_line++;
-
                 int max_displayable_lines = LINES - 4;
                 int available_width = COLS - 6;
-
-                // Calculate visual row position of current_line relative to scroll_y
                 int visual_row_index = 0;
                 for (int i = scroll_y; i <= current_line; i++) {
-                    int l_len = strlen(buffer[i]);
-                    int l_rows = (l_len / available_width) + 1;
-                    if (l_len == 0) l_rows = 1;
-
-                    if (i < current_line) {
-                        visual_row_index += l_rows;
-                    } else {
-                        // Include the lines wrapped by the current cursor row itself
-                        visual_row_index += (cursor_x / available_width);
-                    }
+                    int l_len = strlen(lines[i]);
+                    int l_rows = (l_len == 0) ? 1 : (l_len / available_width) + 1;
+                    if (i < current_line) visual_row_index += l_rows;
+                    else visual_row_index += (cursor_x / available_width);
                 }
-
-                // --- VISUAL SCROLLOFF: Trigger slide if inside 3 rows from the bottom border ---
                 if (max_displayable_lines - visual_row_index <= 3) {
                     scroll_y++;
-                    if (scroll_y > line_count - max_displayable_lines) {
-                        scroll_y = line_count - max_displayable_lines;
-                    }
+                    if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
                     if (scroll_y < 0) scroll_y = 0;
                 }
-
-                int len = strlen(buffer[current_line]);
+                int len = strlen(lines[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
-
-        } else if (ch == KEY_LEFT) {
-            if (cursor_x > 0) cursor_x--;
-        } else if (ch == KEY_RIGHT) {
-            if (cursor_x < (int)strlen(buffer[current_line])) cursor_x++;
-        } else if (ch == 393 || ch == 545 || ch == 260 || ch == 543) {
-            // --- BACKUP / macOS WORD HOP LEFT (Option + Left Arrow) ---
+        }
+        else if (ch == KEY_LEFT) { if (cursor_x > 0) cursor_x--; }
+        else if (ch == KEY_RIGHT) { if (cursor_x < (int)strlen(lines[current_line])) cursor_x++; }
+        else if (ch == 393 || ch == 545 || ch == 260 || ch == 543) {
             if (cursor_x > 0) {
-                while (cursor_x > 0 && isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
-                while (cursor_x > 0 && !isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
+                while (cursor_x > 0 && isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
+                while (cursor_x > 0 && !isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
             }
-            draw_screen();
-            continue;
-        } else if (ch == 402 || ch == 560 || ch == 261 || ch == 544) {
-            // --- BACKUP / macOS WORD HOP RIGHT (Option + Right Arrow) ---
-            int len = strlen(buffer[current_line]);
+            draw_screen(); continue;
+        }
+        else if (ch == 402 || ch == 560 || ch == 261 || ch == 544) {
+            int len = strlen(lines[current_line]);
             if (cursor_x < len) {
-                while (cursor_x < len && !isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
-                while (cursor_x < len && isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
+                while (cursor_x < len && !isspace((unsigned char)lines[current_line][cursor_x])) cursor_x++;
+                while (cursor_x < len && isspace((unsigned char)lines[current_line][cursor_x])) cursor_x++;
             }
-            draw_screen();
-            continue;
-        } else if (ch == KEY_PPAGE) {
-            // --- PAGE UP ---
+            draw_screen(); continue;
+        }
+        else if (ch == KEY_PPAGE) {
             int max_displayable_lines = LINES - 4;
-
-            // Move cursor up by a full page
-            current_line -= max_displayable_lines;
-            if (current_line < 0) current_line = 0;
-
-            // Move the viewport camera up by the same distance
-            scroll_y -= max_displayable_lines;
-            if (scroll_y < 0) scroll_y = 0;
-
-            // Adjust cursor column safety on the new line
-            int len = strlen(buffer[current_line]);
-            if (cursor_x > len) cursor_x = len;
-
-        } else if (ch == KEY_NPAGE) {
-            // --- PAGE DOWN ---
+            current_line -= max_displayable_lines; if (current_line < 0) current_line = 0;
+            scroll_y -= max_displayable_lines; if (scroll_y < 0) scroll_y = 0;
+            int len = strlen(lines[current_line]); if (cursor_x > len) cursor_x = len;
+        }
+        else if (ch == KEY_NPAGE) {
             int max_displayable_lines = LINES - 4;
-
-            // Move cursor down by a full page
-            current_line += max_displayable_lines;
-            if (current_line >= line_count) current_line = line_count - 1;
-
-            // Move the viewport camera down, keeping it in bounds
+            current_line += max_displayable_lines; if (current_line >= line_count) current_line = line_count - 1;
             scroll_y += max_displayable_lines;
-            if (scroll_y > line_count - max_displayable_lines) {
-                scroll_y = line_count - max_displayable_lines;
-            }
+            if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
             if (scroll_y < 0) scroll_y = 0;
-
-            // Adjust cursor column safety on the new line
-            int len = strlen(buffer[current_line]);
-            if (cursor_x > len) cursor_x = len;
-
-        } else if (ch == KEY_HOME || ch == 1 || ch == 27) {
-            // Handle Home, Ctrl+A (\001), or manual escape parsing
+            int len = strlen(lines[current_line]); if (cursor_x > len) cursor_x = len;
+        }
+        else if (ch == KEY_HOME || ch == 1 || ch == 27) {
             if (ch == KEY_HOME || ch == 1) {
                 cursor_x = 0;
-            } else { // It's an Escape byte (27)
+            } else {
                 int next1 = getch();
-
-                // --- macOS OPTION + ARROW SHORTCUTS ---
                 if (next1 == 'b') {
-                    // Option + Left Arrow (Hop Word Left)
                     if (cursor_x > 0) {
-                        while (cursor_x > 0 && isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
-                        while (cursor_x > 0 && !isspace((unsigned char)buffer[current_line][cursor_x - 1])) cursor_x--;
+                        while (cursor_x > 0 && isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
+                        while (cursor_x > 0 && !isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
                     }
                     continue;
-                }
-                else if (next1 == 'f') {
-                    // Option + Right Arrow (Hop Word Right)
-                    int len = strlen(buffer[current_line]);
+                } else if (next1 == 'f') {
+                    int len = strlen(lines[current_line]);
                     if (cursor_x < len) {
-                        while (cursor_x < len && !isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
-                        while (cursor_x < len && isspace((unsigned char)buffer[current_line][cursor_x])) cursor_x++;
+                        while (cursor_x < len && !isspace((unsigned char)lines[current_line][cursor_x])) cursor_x++;
+                        while (cursor_x < len && isspace((unsigned char)lines[current_line][cursor_x])) cursor_x++;
                     }
                     continue;
                 }
-
-                // --- EXISTING EXTENDED KEY ESCAPES ---
                 int next2 = getch();
-                // Check if it's the sequence for Home: \033[1~ or \033[H
                 if (next1 == '[' && (next2 == '1' || next2 == 'H')) {
-                    if (next2 == '1') getch(); // Swallow the trailing '~'
+                    if (next2 == '1') getch();
                     cursor_x = 0;
-                }
-                // Check if it's the sequence for End: \033[4~ or \033[F
-                else if (next1 == '[' && (next2 == '4' || next2 == 'F')) {
-                    if (next2 == '4') getch(); // Swallow the trailing '~'
-                    cursor_x = (int)strlen(buffer[current_line]);
-                } else {
-                    ungetch(next2);
-                    ungetch(next1);
-                }
+                } else if (next1 == '[' && (next2 == '4' || next2 == 'F')) {
+                    if (next2 == '4') getch();
+                    cursor_x = (int)strlen(lines[current_line]);
+                } else { ungetch(next2); ungetch(next1); }
             }
-
-        } else if (ch == KEY_END || ch == 5) {
-            // Handle End or Ctrl+E (\005)
-            cursor_x = (int)strlen(buffer[current_line]);
-
-        } else if (ch == 9) {
-            int len = strlen(buffer[current_line]);
+        }
+        else if (ch == KEY_END || ch == 5) {
+            cursor_x = (int)strlen(lines[current_line]);
+            (void)0;
+        }
+        else if (ch == 9) {
+            /* Tab */
+            int len = strlen(lines[current_line]);
             int is_makefile = (strstr(current_filename, "Makefile") != NULL);
             int tab_size = is_makefile ? 1 : 4;
-
-            if (len + tab_size < MAX_LINE_LEN) {
+            char *new_line = malloc(len + tab_size + 1);
+            if (new_line) {
                 save_undo_state_single(current_line);
-
-                // Force an insertion regardless of the global overwrite_mode state
-                memmove(&buffer[current_line][cursor_x + tab_size],
-                        &buffer[current_line][cursor_x],
-                        len - cursor_x + 1);
-
-                if (is_makefile) {
-                    buffer[current_line][cursor_x] = '\t';
-                    tracker_set_modified(current_line, cursor_x, 1);
-                } else {
-                    for (int i = 0; i < tab_size; i++) {
-                        buffer[current_line][cursor_x + i] = ' ';
-                        tracker_set_modified(current_line, cursor_x + i, 1);
-                    }
-                }
+                memcpy(new_line, lines[current_line], cursor_x);
+                if (is_makefile) new_line[cursor_x] = '\t';
+                else memset(new_line + cursor_x, ' ', tab_size);
+                memcpy(new_line + cursor_x + tab_size, lines[current_line] + cursor_x, len - cursor_x + 1);
+                free(lines[current_line]); lines[current_line] = new_line;
+                for (int i = 0; i < tab_size; i++)
+                    tracker_set_modified(current_line, cursor_x + i, 1);
                 cursor_x += tab_size;
-                // DO NOT add any extra braces or continue statements here
-                is_modified = 1;
-                mod_count++;
+                is_modified = 1; mod_count++;
             }
+        }
+        else if (ch == 10 || ch == 13) {
+            /* Enter */
+            if (!paste_batch_active) save_undo_state_single(current_line);
+            /* Split current line at cursor */
+            char *tail = xstrdup(lines[current_line] + cursor_x);
+            lines[current_line][cursor_x] = '\0';
+            insert_line_at(current_line + 1, tail);
+            free(tail);
+            current_line++; cursor_x = 0;
+            is_modified = 1;
 
-        } else if (ch == 10 || ch == 13) {
-            // Handle Enter Key
-            if (line_count < MAX_LINES) {
-                if (!paste_batch_active) {
-                    save_undo_state_single(current_line);
-                }
-                for (int i = line_count; i > current_line + 1; i--) {
-                    strcpy(buffer[i], buffer[i - 1]);
-                }
-                //strcpy(buffer[current_line + 1], &buffer[current_line][cursor_x]);
-                memmove(&buffer[current_line][cursor_x],
-                    &buffer[current_line][cursor_x + 1],
-                    strlen(&buffer[current_line][cursor_x + 1]) + 1);
-                buffer[current_line][cursor_x] = '\0';
-                current_line++;
-                cursor_x = 0;
-                line_count++;
-                is_modified = 1;
-
-                // --- VISUAL SCROLLOFF: Handle viewport updates for layout wrapping on Enter ---
-                int max_displayable_lines = LINES - 4;
-                int available_width = COLS - 6;
-                int visual_row_index = 0;
-
-                for (int i = scroll_y; i < current_line; i++) {
-                    int l_len = strlen(buffer[i]);
-                    int l_rows = (l_len / available_width) + 1;
-                    if (l_len == 0) l_rows = 1;
-                    visual_row_index += l_rows;
-                }
-
-                if (max_displayable_lines - visual_row_index <= 3) {
-                    scroll_y++;
-                    if (scroll_y > line_count - max_displayable_lines) {
-                        scroll_y = line_count - max_displayable_lines;
-                    }
-                    if (scroll_y < 0) scroll_y = 0;
-                }
+            int max_displayable_lines = LINES - 4;
+            int available_width = COLS - 6;
+            int visual_row_index = 0;
+            for (int i = scroll_y; i < current_line; i++) {
+                int l_len = strlen(lines[i]);
+                visual_row_index += (l_len == 0) ? 1 : (l_len / available_width) + 1;
             }
-
-        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            // Handle Backspace
+            if (max_displayable_lines - visual_row_index <= 3) {
+                scroll_y++;
+                if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
+                if (scroll_y < 0) scroll_y = 0;
+            }
+        }
+        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (cursor_x > 0) {
                 save_undo_state_single(current_line);
-                int len = strlen(buffer[current_line]);
-                memmove(&buffer[current_line][cursor_x - 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
-                cursor_x--;
-                is_modified = 1;
+                int len = strlen(lines[current_line]);
+                memmove(lines[current_line] + cursor_x - 1,
+                        lines[current_line] + cursor_x,
+                        len - cursor_x + 1);
+                cursor_x--; is_modified = 1;
             } else if (current_line > 0) {
                 save_undo_state_single(current_line);
-                int target_line = current_line - 1;
-                int target_len = strlen(buffer[target_line]);
-
-                if (target_len + strlen(buffer[current_line]) < MAX_LINE_LEN) {
-                    //strcat(buffer[target_line], buffer[current_line]);
-                    //memmove(&buffer[target_line][target_len], buffer[current_line], current_len + 1);
-                    memmove(&buffer[target_line][target_len], buffer[current_line], strlen(buffer[current_line]) + 1);
-                    for (int i = current_line; i < line_count - 1; i++) {
-                        strcpy(buffer[i], buffer[i + 1]);
-                    }
-                    buffer[line_count - 1][0] = '\0';
-                    current_line--;
-                    cursor_x = target_len;
-                    line_count--;
+                int target = current_line - 1;
+                int target_len = strlen(lines[target]);
+                int cur_len = strlen(lines[current_line]);
+                char *merged = malloc(target_len + cur_len + 1);
+                if (merged) {
+                    memcpy(merged, lines[target], target_len);
+                    memcpy(merged + target_len, lines[current_line], cur_len + 1);
+                    free(lines[target]); lines[target] = merged;
+                    remove_line_at(current_line);
+                    current_line--; cursor_x = target_len;
                     is_modified = 1;
-                    if (current_line < scroll_y) {
-                        scroll_y = current_line;
-                    }
+                    if (current_line < scroll_y) scroll_y = current_line;
                 }
             }
-
-        } else if (ch == KEY_DC || ch == 330) {
-            // Handle Forward Delete (Delete key)
-            int len = strlen(buffer[current_line]);
-
-            // Case 1: Cursor is within the text, delete the character directly under it
+        }
+        else if (ch == KEY_DC || ch == 330) {
+            int len = strlen(lines[current_line]);
             if (cursor_x < len) {
                 save_undo_state_single(current_line);
-                // Shift everything after the cursor left by 1 position
-                memmove(&buffer[current_line][cursor_x], &buffer[current_line][cursor_x + 1], len - cursor_x);
+                memmove(lines[current_line] + cursor_x,
+                        lines[current_line] + cursor_x + 1,
+                        len - cursor_x);
                 is_modified = 1;
-            }
-            // Case 2: Cursor is at the absolute end of the line, merge the NEXT line up
-            else if (current_line < line_count - 1) {
-                int next_line = current_line + 1;
-                int next_len = strlen(buffer[next_line]);
-
-                // Ensure merging won't overflow the maximum allowable line buffer width
-                if (len + next_len < MAX_LINE_LEN) {
+            } else if (current_line < line_count - 1) {
+                int next = current_line + 1;
+                int next_len = strlen(lines[next]);
+                char *merged = malloc(len + next_len + 1);
+                if (merged) {
                     save_undo_state_single(current_line);
-
-                    // Append the contents of the next line directly onto this one
-                    //strcat(buffer[current_line], buffer[next_line]);
-                    memmove(&buffer[current_line][len], buffer[next_line], next_len + 1);
-
-                    // Shift all subsequent lines up by 1 slot to fill the gap
-                    for (int i = next_line; i < line_count - 1; i++) {
-                        strcpy(buffer[i], buffer[i + 1]);
-                    }
-                    buffer[line_count - 1][0] = '\0'; // Clear the trailing duplicated row
-                    line_count--;
+                    memcpy(merged, lines[current_line], len);
+                    memcpy(merged + len, lines[next], next_len + 1);
+                    free(lines[current_line]); lines[current_line] = merged;
+                    remove_line_at(next);
                     is_modified = 1;
                 }
             }
-    } else if (ch >= 32 && ch <= 126) {
-        // Handle typing a character
-        int len = strlen(buffer[current_line]);
-        if (cursor_x <= len) {
-
-                if (!paste_batch_active) {
-                    if (cursor_x == 0 || (buffer[current_line][cursor_x - 1] == ' ' && ch != ' ')) {
-                        save_undo_state_single(current_line);
-                    } else if (mod_count == 0 || cursor_x % 10 == 0) {
-                        save_undo_state_single(current_line);
-                    }
-                }
-
+        }
+        else if (ch >= 32 && ch <= 126) {
+            int len = strlen(lines[current_line]);
+            if (!paste_batch_active) {
+                if (cursor_x == 0 || (lines[current_line][cursor_x-1] == ' ' && ch != ' '))
+                    save_undo_state_single(current_line);
+                else if (mod_count == 0 || cursor_x % 10 == 0)
+                    save_undo_state_single(current_line);
+            }
             if (overwrite_mode && cursor_x < len) {
-                // Overwrite mode: just replace the character
-                buffer[current_line][cursor_x] = (char)ch;
+                lines[current_line][cursor_x] = (char)ch;
             } else {
-                // Insert mode (or at end of line): shift characters right
-                if (len + 1 < MAX_LINE_LEN) {
-                    memmove(&buffer[current_line][cursor_x + 1], &buffer[current_line][cursor_x], len - cursor_x + 1);
-                    buffer[current_line][cursor_x] = (char)ch;
+                char *new_line = malloc(len + 2);
+                if (new_line) {
+                    memcpy(new_line, lines[current_line], cursor_x);
+                    new_line[cursor_x] = (char)ch;
+                    memcpy(new_line + cursor_x + 1, lines[current_line] + cursor_x, len - cursor_x + 1);
+                    free(lines[current_line]); lines[current_line] = new_line;
                 }
             }
             tracker_set_modified(current_line, cursor_x, 1);
-            cursor_x++;
-            is_modified = 1;
-            // --- ADD AUTO-SAVE TRIGGER ---
+            cursor_x++; is_modified = 1;
             mod_count++;
-            if (mod_count >= 50) {
-                auto_save();
-                mod_count = 0;
-            }
+            if (mod_count >= 50) { auto_save(); mod_count = 0; }
         }
-    }
-	} // <--- Closes the while(1) loop
-    undo_stack_top = -1;
+    } /* end while(1) */
 
+    undo_stack_top = -1;
+    tracker_free();
+    for (int i = 0; i < line_count; i++) free(lines[i]);
+    free(lines);
     endwin();
     return 0;
-} // <--- Closes main()
+}
