@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.11 (2026)
+ * Version: 1.1.12 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.11"
+#define VERSION "1.1.12"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -86,6 +86,9 @@ int in_paste_stream = 0;
 /* Bracket match highlight: -1 means no active match */
 int match_line = -1;
 int match_col  = -1;
+
+/* Line clipboard for Ctrl+K / Ctrl+P */
+static char *clipboard_line = NULL;
 
 /* ---------- undo / redo ----------
  *
@@ -977,7 +980,7 @@ void delete_lines_interactive() {
 
 /* ---------- help window ---------- */
 void show_help_window() {
-    int height = 19, width = 50;
+    int height = 23, width = 50;
     int start_y = (LINES - height) / 2;
     int start_x = (COLS - width) / 2;
     WINDOW *help_win = newwin(height, width, start_y, start_x);
@@ -996,14 +999,18 @@ void show_help_window() {
         "Ctrl+U  Undo",
         "Ctrl+Y  Redo",
         "Ctrl+D  Delete line(s)",
+        "Ctrl+K  Cut line",
+        "Ctrl+P  Paste line",
         "Ctrl+X  Toggle Insert/Overwrite",
         "Ctrl+T  Top of file",
         "Ctrl+B  Bottom of file",
+        "Ctrl+A  Line start (smart)",
+        "Ctrl+E  Line end",
         "Ctrl+?  This help screen",
         "",
         "Press any key to close..."
     };
-    for (int i = 0; i < 15; i++)
+    for (int i = 0; i < 19; i++)
         mvwprintw(help_win, 2 + i, 2, "%s", help[i]);
     wrefresh(help_win);
     wgetch(help_win);
@@ -1029,7 +1036,10 @@ int main(int argc, char *argv[]) {
     init_pair(1, COLOR_YELLOW, COLOR_BLACK);
     noecho();
     curs_set(1);
-    mousemask(BUTTON1_PRESSED, NULL);
+#ifndef BUTTON5_PRESSED
+#define BUTTON5_PRESSED BUTTON2_PRESSED
+#endif
+    mousemask(BUTTON1_PRESSED | BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
 
     /* Initialise tracker with a modest hint; it only uses 1 byte per line */
     tracker_init(1024, 1);
@@ -1113,9 +1123,51 @@ int main(int argc, char *argv[]) {
             scroll_y = current_line - max_displayable_lines + 1;
             if (scroll_y < 0) scroll_y = 0;
         }
+        else if (ch == CTRL_KEY('k')) {
+            /* Cut current line into clipboard */
+            record_bulk(current_line, 1);
+            free(clipboard_line);
+            clipboard_line = xstrdup(lines[current_line]);
+            if (line_count > 1) {
+                remove_line_at(current_line);
+                if (current_line >= line_count) current_line = line_count - 1;
+            } else {
+                /* Last line: just clear it */
+                free(lines[0]); lines[0] = xstrdup("");
+            }
+            cursor_x = 0;
+            if (current_line < scroll_y) scroll_y = current_line;
+            is_modified = 1;
+            snprintf(status_msg, sizeof(status_msg), "Line cut.");
+        }
+        else if (ch == CTRL_KEY('p')) {
+            /* Paste clipboard line above current line */
+            if (clipboard_line) {
+                record_bulk(current_line, line_count - current_line);
+                insert_line_at(current_line, clipboard_line);
+                cursor_x = 0;
+                is_modified = 1;
+                snprintf(status_msg, sizeof(status_msg), "Line pasted.");
+            } else {
+                snprintf(status_msg, sizeof(status_msg), "Clipboard is empty.");
+            }
+        }
         else if (ch == KEY_MOUSE) {
             MEVENT me;
-            if (getmouse(&me) == OK && (me.bstate & BUTTON1_PRESSED)) {
+            if (getmouse(&me) == OK) {
+                int scroll_speed = 3;
+                if (me.bstate & BUTTON4_PRESSED) {
+                    scroll_y -= scroll_speed;
+                    if (scroll_y < 0) scroll_y = 0;
+                    if (current_line < scroll_y) current_line = scroll_y;
+                } else if (me.bstate & BUTTON5_PRESSED) {
+                    int mdl = LINES - 4;
+                    scroll_y += scroll_speed;
+                    if (scroll_y > line_count - 1) scroll_y = line_count - 1;
+                    if (scroll_y < 0) scroll_y = 0;
+                    if (current_line < scroll_y) current_line = scroll_y;
+                    else if (current_line >= scroll_y + mdl) current_line = scroll_y + mdl - 1;
+                } else if (me.bstate & BUTTON1_PRESSED) {
                 int click_row = (int)me.y;
                 int click_col = (int)me.x;
                 /* rows 0 and 1 are header; rows LINES-2 and LINES-1 are status */
@@ -1148,6 +1200,7 @@ int main(int argc, char *argv[]) {
                         cursor_x = (int)strlen(lines[current_line]);
                     }
                 }
+                } /* end BUTTON1_PRESSED */
             }
         }
         else if (ch == '%') {
@@ -1270,9 +1323,16 @@ int main(int argc, char *argv[]) {
                 } else { ungetch(next2); ungetch(next1); }
             }
         }
-        else if (ch == KEY_END || ch == 5) {
+        else if (ch == KEY_END || ch == CTRL_KEY('e')) {
             cursor_x = (int)strlen(lines[current_line]);
-            (void)0;
+        }
+        else if (ch == KEY_HOME || ch == CTRL_KEY('a')) {
+            /* First press: jump to first non-whitespace; second press: column 0 */
+            int first_nws = 0;
+            while (first_nws < (int)strlen(lines[current_line]) &&
+                   isspace((unsigned char)lines[current_line][first_nws]))
+                first_nws++;
+            cursor_x = (cursor_x == first_nws) ? 0 : first_nws;
         }
         else if (ch == 9) {
             /* Tab — record as bulk (multi-char insert) */
@@ -1296,11 +1356,27 @@ int main(int argc, char *argv[]) {
         else if (ch == 10 || ch == 13) {
             /* Enter — record line split */
             if (!paste_batch_active) record_line_split(current_line, cursor_x);
-            char *tail = xstrdup(lines[current_line] + cursor_x);
+            /* Measure leading whitespace of the current line for auto-indent */
+            int indent_len = 0;
+            while (lines[current_line][indent_len] == ' ' ||
+                   lines[current_line][indent_len] == '\t')
+                indent_len++;
+            /* Only auto-indent if cursor is at or past the indented region */
+            if (cursor_x < indent_len) indent_len = 0;
+            char *tail_text = lines[current_line] + cursor_x;
+            int tail_len = (int)strlen(tail_text);
+            char *new_line = malloc(indent_len + tail_len + 1);
+            if (new_line) {
+                memcpy(new_line, lines[current_line], indent_len);
+                memcpy(new_line + indent_len, tail_text, tail_len + 1);
+            } else {
+                new_line = xstrdup(tail_text);
+                indent_len = 0;
+            }
             lines[current_line][cursor_x] = '\0';
-            insert_line_at(current_line + 1, tail);
-            free(tail);
-            current_line++; cursor_x = 0;
+            insert_line_at(current_line + 1, new_line);
+            free(new_line);
+            current_line++; cursor_x = indent_len;
             is_modified = 1;
 
             int max_displayable_lines = LINES - 4;
@@ -1395,6 +1471,7 @@ int main(int argc, char *argv[]) {
     free(undo_buf);
     for (int i = 0; i <= redo_top; i++) free_op(&redo_buf[i]);
     free(redo_buf);
+    free(clipboard_line);
     tracker_free();
     for (int i = 0; i < line_count; i++) free(lines[i]);
     free(lines);

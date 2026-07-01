@@ -70,6 +70,6 @@ If the file does not exist it will be created when you first save.
 ## License
 
 As of version 1.1.9, qi is licensed under the GPL, version 3.
-Versions of qi prior to 1.1.9 are proprietary code and may not be copied, modified, or distributed. In cases where older code is unchanged in the 1.1.9 or later versions, that code is covered by the GPL only when it is included in the appropriately-licensed version of the software.
+Versions of qi prior to 1.1.9 are proprietary code and may not be copied, modified, or distributed. In cases where older code is unchanged in the 1.1.9 or later versions, that code is covered by the GPL only when it is included with the GPL-licensed version of the software.
 
 Copyright (C) 2026 Christopher Camacho
