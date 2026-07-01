@@ -2,6 +2,11 @@
 
 ### 💼 Other
 
+- Features: gutter width scaling, long-line truncation marker, toggle syntax highlighting, del word left, duplicate line, dedent. Save is now CTRL+S
+## [1.1.14] - 2026-07-01
+
+### 💼 Other
+
 - Status bar now shows Ln: Col:
 ## [1.1.12] - 2026-07-01
 
