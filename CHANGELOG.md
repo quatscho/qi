@@ -1,3 +1,8 @@
+## [1.1.12] - 2026-07-01
+
+### 💼 Other
+
+- Added line cut/paste, auto-indent on enter, smart line start/end, and mouse scroll wheel support
 ## [1.1.11] - 2026-07-01
 
 ### 💼 Other
