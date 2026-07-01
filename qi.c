@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.16 (2026)
+ * Version: 1.1.17 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.16"
+#define VERSION "1.1.17"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1037,7 +1037,7 @@ void show_help_window() {
         { "%",             "Jump to matching bracket",   0 },
         { "",              "",                            0 },
         { "VIEW",          NULL,                         1 },
-        { "Ctrl+L",        "Toggle syntax highlight",    0 },
+        { "F5",            "Toggle syntax highlight",    0 },
         { "Ctrl+X",        "Toggle Insert/Overwrite",    0 },
         { "Ctrl+?",        "This help screen",           0 },
     };
@@ -1213,7 +1213,7 @@ int main(int argc, char *argv[]) {
                 is_modified = 1;
             }
         }
-        else if (ch == CTRL_KEY('l')) {
+        else if (ch == KEY_F(5)) {
             syntax_highlight_enabled = !syntax_highlight_enabled;
             snprintf(status_msg, sizeof(status_msg), "Syntax highlighting %s.",
                      syntax_highlight_enabled ? "on" : "off");
