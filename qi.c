@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.20 (2026)
+ * Version: 1.1.21 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.20"
+#define VERSION "1.1.21"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1119,7 +1119,7 @@ void show_help_window() {
         { "Ctrl+K",        "Cut line",                   0 },
         { "Ctrl+P",        "Paste line",                 0 },
         { "Ctrl+W",        "Delete word left",           0 },
-        { "Ctrl+J",        "Duplicate line",             0 },
+        { "Ctrl+N",        "Duplicate line",             0 },
         { "Tab",           "Indent",                     0 },
         { "Shift+Tab",     "Dedent",                     0 },
         { "",              "",                            0 },
@@ -1366,7 +1366,7 @@ int main(int argc, char *argv[]) {
             snprintf(status_msg, sizeof(status_msg), "Syntax highlighting %s.",
                      syntax_highlight_enabled ? "on" : "off");
         }
-        else if (ch == CTRL_KEY('j')) {
+        else if (ch == CTRL_KEY('n')) {
             /* Duplicate current line */
             record_bulk(current_line, 1);
             insert_line_at(current_line + 1, lines[current_line]);
@@ -1493,7 +1493,7 @@ int main(int argc, char *argv[]) {
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;}
+                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;} 
                 int available_width = COLS - 1 - (gutter_visible ? (gd_u + 3) : 0);
                 int visual_rows_above = 0;
                 for (int i = scroll_y; i < current_line; i++) {
