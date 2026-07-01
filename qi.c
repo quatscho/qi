@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.14 (2026)
+ * Version: 1.1.15 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.14"
+#define VERSION "1.1.15"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -707,7 +707,7 @@ void draw_screen() {
         int vis_col = (tw_s > 0) ? (cursor_x % tw_s) + 1 : cursor_x + 1;
         if (!is_modified) {
             mvprintw(LINES - 1, 0,
-                "qi text editor, v.%s (c) 2026, Christopher Camacho | Ln: %d Col: %d | (^? for Help)",
+                "qi v%s  |  Ln: %d  Col: %d  |  ^? for Help",
                 VERSION, current_line + 1, vis_col);
         } else {
             int total_chars = 0, modified_lines = 0;
@@ -1002,45 +1002,111 @@ void delete_lines_interactive() {
 
 /* ---------- help window ---------- */
 void show_help_window() {
-    int height = 27, width = 50;
-    int start_y = (LINES - height) / 2;
-    int start_x = (COLS - width) / 2;
-    WINDOW *help_win = newwin(height, width, start_y, start_x);
-    keypad(help_win, TRUE);
-    box(help_win, 0, 0);
-    wattron(help_win, COLOR_PAIR(1) | A_BOLD);
-    mvwprintw(help_win, 0, (width - 10) / 2, " qi v%s ", VERSION);
-    wattroff(help_win, COLOR_PAIR(1) | A_BOLD);
-    const char *help[] = {
-        "Ctrl+S  Save file",
-        "Ctrl+O  Open file",
-        "Ctrl+Q  Quit",
-        "Ctrl+F  Find text",
-        "Ctrl+R  Find & Replace",
-        "Ctrl+G  Go to line",
-        "Ctrl+U  Undo",
-        "Ctrl+Y  Redo",
-        "Ctrl+D  Delete line(s)",
-        "Ctrl+K  Cut line",
-        "Ctrl+P  Paste line",
-        "Ctrl+W  Delete word left",
-        "Ctrl+J  Duplicate line",
-        "Ctrl+H  Toggle syntax highlight",
-        "Shift+Tab  Dedent line",
-        "Ctrl+X  Toggle Insert/Overwrite",
-        "Ctrl+T  Top of file",
-        "Ctrl+B  Bottom of file",
-        "Ctrl+A  Line start (smart)",
-        "Ctrl+E  Line end",
-        "Ctrl+?  This help screen",
-        "",
-        "Press any key to close..."
+    /* Categorised, scrollable help entries.
+     * NULL entries are section headers; empty string "" is a blank spacer. */
+    struct HelpEntry { const char *key; const char *desc; int is_header; };
+    static const struct HelpEntry entries[] = {
+        { "FILE",          NULL,                         1 },
+        { "Ctrl+S",        "Save file",                  0 },
+        { "Ctrl+O",        "Open file",                  0 },
+        { "Ctrl+Q",        "Quit",                       0 },
+        { "",              "",                            0 },
+        { "SEARCH",        NULL,                         1 },
+        { "Ctrl+F",        "Find text",                  0 },
+        { "Ctrl+R",        "Find & Replace",             0 },
+        { "Ctrl+G",        "Go to line",                 0 },
+        { "",              "",                            0 },
+        { "UNDO / REDO",   NULL,                         1 },
+        { "Ctrl+U",        "Undo",                       0 },
+        { "Ctrl+Y",        "Redo",                       0 },
+        { "",              "",                            0 },
+        { "EDITING",       NULL,                         1 },
+        { "Ctrl+D",        "Delete line(s)",             0 },
+        { "Ctrl+K",        "Cut line",                   0 },
+        { "Ctrl+P",        "Paste line",                 0 },
+        { "Ctrl+W",        "Delete word left",           0 },
+        { "Ctrl+J",        "Duplicate line",             0 },
+        { "Tab",           "Indent",                     0 },
+        { "Shift+Tab",     "Dedent",                     0 },
+        { "",              "",                            0 },
+        { "NAVIGATION",    NULL,                         1 },
+        { "Ctrl+T",        "Top of file",                0 },
+        { "Ctrl+B",        "Bottom of file",             0 },
+        { "Ctrl+A",        "Line start (smart)",         0 },
+        { "Ctrl+E",        "Line end",                   0 },
+        { "%",             "Jump to matching bracket",   0 },
+        { "",              "",                            0 },
+        { "VIEW",          NULL,                         1 },
+        { "Ctrl+H",        "Toggle syntax highlight",    0 },
+        { "Ctrl+X",        "Toggle Insert/Overwrite",    0 },
+        { "Ctrl+?",        "This help screen",           0 },
     };
-    for (int i = 0; i < 23; i++)
-        mvwprintw(help_win, 2 + i, 2, "%s", help[i]);
-    wrefresh(help_win);
-    wgetch(help_win);
-    delwin(help_win);
+    int total = (int)(sizeof(entries) / sizeof(entries[0]));
+
+    int win_h = 20, win_w = 46;
+    if (win_h > LINES - 2) win_h = LINES - 2;
+    int inner_h = win_h - 5; /* rows available for scrolling content */
+    int start_y = (LINES - win_h) / 2;
+    int start_x = (COLS  - win_w) / 2;
+    WINDOW *hw = newwin(win_h, win_w, start_y, start_x);
+    keypad(hw, TRUE);
+
+    int scroll = 0;
+    for (;;) {
+        werase(hw);
+        box(hw, 0, 0);
+        wattron(hw, COLOR_PAIR(1) | A_BOLD);
+        mvwprintw(hw, 0, (win_w - 10) / 2, " qi v%s ", VERSION);
+        wattroff(hw, COLOR_PAIR(1) | A_BOLD);
+
+        /* Render visible entries */
+        int row = 1;
+        int rendered = 0;
+        for (int i = 0; i < total && row < 1 + inner_h; i++) {
+            if (rendered < scroll) { rendered++; continue; }
+            if (entries[i].is_header) {
+                wattron(hw, A_BOLD | A_UNDERLINE);
+                mvwprintw(hw, row, 2, "%s", entries[i].key);
+                wattroff(hw, A_BOLD | A_UNDERLINE);
+            } else if (entries[i].key[0] == '\0') {
+                /* blank spacer */
+            } else {
+                mvwprintw(hw, row, 2,  "%-14s", entries[i].key);
+                mvwprintw(hw, row, 16, "%s", entries[i].desc);
+            }
+            row++;
+            rendered++;
+        }
+
+        /* Scroll indicator */
+        if (scroll > 0)
+            mvwprintw(hw, 1, win_w - 4, " ^ ");
+        if (scroll + inner_h < total)
+            mvwprintw(hw, inner_h, win_w - 4, " v ");
+
+        /* Footer */
+        for (int x = 1; x < win_w - 1; x++) mvwaddch(hw, win_h - 4, x, ACS_HLINE);
+        wattron(hw, A_DIM);
+        mvwprintw(hw, win_h - 3, 2, "Arrow keys to scroll");
+        wattroff(hw, A_DIM);
+        wattron(hw, COLOR_PAIR(1));
+        mvwprintw(hw, win_h - 2, 2, "Press any key to close...");
+        wattroff(hw, COLOR_PAIR(1));
+        /* Copyright centred on last inner row */
+        char copy[48];
+        snprintf(copy, sizeof(copy), "(c) 2026 Christopher Camacho");
+        mvwprintw(hw, win_h - 1, (win_w - (int)strlen(copy)) / 2, "%s", copy);
+
+        wrefresh(hw);
+
+        int ch = wgetch(hw);
+        if (ch == KEY_UP   || ch == 'k') { if (scroll > 0) scroll--; }
+        else if (ch == KEY_DOWN || ch == 'j') { if (scroll + inner_h < total) scroll++; }
+        else if (ch == KEY_PPAGE) { scroll -= inner_h; if (scroll < 0) scroll = 0; }
+        else if (ch == KEY_NPAGE) { scroll += inner_h; if (scroll + inner_h > total) scroll = total - inner_h; if (scroll < 0) scroll = 0; }
+        else break;
+    }
+    delwin(hw);
     touchwin(stdscr);
     refresh();
 }
