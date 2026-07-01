@@ -1,3 +1,8 @@
+## [unreleased]
+
+### 💼 Other
+
+- Status bar now shows Ln: Col:
 ## [1.1.12] - 2026-07-01
 
 ### 💼 Other
