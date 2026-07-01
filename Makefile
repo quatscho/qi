@@ -4,7 +4,7 @@ CFLAGS = -Wall -Wextra -O2
 LIBS = -lncurses
 TARGET = qi
 SRCS = qi.c tracker.c syntax.c
-INSTALL_DIR = $(HOME)/bin
+INSTALL_DIR = /usr/local/bin
 
 # --- AUTOMATIC HOMEBREW PATH DISCOVERY ---
 # If 'brew' is available, append its include and library directories dynamically
@@ -20,7 +20,12 @@ all: $(TARGET)
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) $(LDFLAGS) $(SRCS) -o $(TARGET) $(LIBS)
 
-# Install target to move the binary to ~/bin
+# Install target — defaults to /usr/local/bin.
+# Use 'make install LOCAL=1' to install to ~/bin instead.
+ifdef LOCAL
+INSTALL_DIR = $(HOME)/bin
+endif
+
 install: $(TARGET)
 	mkdir -p $(INSTALL_DIR)
 	cp $(TARGET) $(INSTALL_DIR)/$(TARGET)
