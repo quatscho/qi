@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.21 (2026)
+ * Version: 1.1.22 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.21"
+#define VERSION "1.1.22"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1675,19 +1675,12 @@ int main(int argc, char *argv[]) {
             current_line++; cursor_x = indent_len;
             is_modified = 1;
 
+            /* Ensure the new line is always visible after Enter */
             int max_displayable_lines = LINES - 4;
-            { int gd_e=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_e++;}
-            int available_width = COLS - 1 - (gutter_visible ? (gd_e + 3) : 0);
-            int visual_row_index = 0;
-            for (int i = scroll_y; i < current_line; i++) {
-                int l_dw = utf8_display_width(lines[i]);
-                visual_row_index += (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
-            }
-            if (max_displayable_lines - visual_row_index <= 3) {
-                scroll_y++;
-                if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
+            if (current_line >= scroll_y + max_displayable_lines) {
+                scroll_y = current_line - max_displayable_lines + 1;
                 if (scroll_y < 0) scroll_y = 0;
-            } }
+            }
         }
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (cursor_x > 0) {
