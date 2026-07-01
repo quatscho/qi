@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.0 (2026)
+ * Version: 1.1.1 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -20,7 +20,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.0"
+#define VERSION "1.1.1"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -323,11 +323,12 @@ void draw_screen() {
 
     int max_displayable_lines = LINES - 4;
     int physical_row = 2;
+    /* wrap one column before the terminal edge to prevent ncurses auto-scroll */
+    int wrap_col = COLS - 1;
+    int file_line_index = scroll_y;
 
-    for (int i = 0; i < max_displayable_lines; i++) {
-        int file_line_index = scroll_y + i;
+    while (physical_row < 2 + max_displayable_lines && file_line_index < line_count) {
         move(physical_row, 0); clrtoeol();
-        if (file_line_index >= line_count) { physical_row++; continue; }
 
         if (file_line_index == current_line) {
             attron(COLOR_PAIR(1));
@@ -354,17 +355,23 @@ void draw_screen() {
         while (leading_space < len && (line[leading_space] == ' ' || line[leading_space] == '\t')) {
             printw("%c", line[leading_space]);
             current_phys_col++;
-            if (current_phys_col >= COLS) {
+            if (current_phys_col >= wrap_col) {
                 current_phys_row++; current_phys_col = 6;
-                move(current_phys_row, current_phys_col);
+                if (current_phys_row < 2 + max_displayable_lines) {
+                    move(current_phys_row, current_phys_col);
+                    clrtoeol();
+                }
             }
             leading_space++;
         }
 
         for (int j = leading_space; j < len; j++) {
-            if (current_phys_col >= COLS) {
+            if (current_phys_col >= wrap_col) {
                 current_phys_row++; current_phys_col = 6;
-                move(current_phys_row, current_phys_col);
+                if (current_phys_row < 2 + max_displayable_lines) {
+                    move(current_phys_row, current_phys_col);
+                    clrtoeol();
+                } else break;
             }
             if (j == leading_space && line[j] == '#') {
                 attron(COLOR_PAIR(3)); printw("%s", &line[j]); attroff(COLOR_PAIR(3)); break;
@@ -397,12 +404,15 @@ void draw_screen() {
                         line[j + kw_len] != '_') {
                         attron(COLOR_PAIR(2));
                         for (int m = 0; m < kw_len; m++) {
+                            if (current_phys_col >= wrap_col) {
+                                current_phys_row++; current_phys_col = 6;
+                                if (current_phys_row < 2 + max_displayable_lines) {
+                                    move(current_phys_row, current_phys_col);
+                                    clrtoeol();
+                                } else break;
+                            }
                             printw("%c", line[j + m]);
                             current_phys_col++;
-                            if (current_phys_col >= COLS) {
-                                current_phys_row++; current_phys_col = 6;
-                                move(current_phys_row, current_phys_col);
-                            }
                         }
                         attroff(COLOR_PAIR(2));
                         j += kw_len - 1;
@@ -416,6 +426,25 @@ void draw_screen() {
             current_phys_col++;
         }
         physical_row = current_phys_row + 1;
+        file_line_index++;
+    }
+
+    /* clear any remaining rows below the last rendered line */
+    while (physical_row < 2 + max_displayable_lines) {
+        move(physical_row, 0); clrtoeol();
+        physical_row++;
+    }
+
+    /* Column-81 margin guide */
+    if (COLS > 81) {
+        for (int r = 2; r < LINES - 2; r++) {
+            chtype ch_at = mvinch(r, 81);
+            if ((ch_at & A_CHARTEXT) == ' ') {
+                attron(A_DIM);
+                mvaddch(r, 81, ACS_VLINE);
+                attroff(A_DIM);
+            }
+        }
     }
 
     /* Status bar */
@@ -426,15 +455,16 @@ void draw_screen() {
     printw(" %s", status_msg);
     attroff(COLOR_PAIR(3));
 
-    /* Cursor placement */
+    /* Cursor placement — use the same wrap width as draw_screen (COLS - 7) */
+    int text_width = COLS - 7;
     int cursor_physical_row = 2;
     for (int i = scroll_y; i < current_line; i++) {
         int l_len = strlen(lines[i]);
-        int l_rows = (l_len / (COLS - 6)) + 1;
-        cursor_physical_row += (l_len == 0) ? 1 : l_rows;
+        int l_rows = (l_len == 0) ? 1 : (l_len / text_width) + 1;
+        cursor_physical_row += l_rows;
     }
-    cursor_physical_row += (cursor_x / (COLS - 6));
-    int cursor_physical_col = 6 + (cursor_x % (COLS - 6));
+    cursor_physical_row += (cursor_x / text_width);
+    int cursor_physical_col = 6 + (cursor_x % text_width);
 
     if (cursor_physical_row < LINES - 2) move(cursor_physical_row, cursor_physical_col);
     else move(LINES - 3, COLS - 1);
@@ -839,7 +869,7 @@ int main(int argc, char *argv[]) {
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-                int available_width = COLS - 6;
+                int available_width = COLS - 7;
                 int visual_rows_above = 0;
                 for (int i = scroll_y; i < current_line; i++) {
                     int l_len = strlen(lines[i]);
@@ -863,7 +893,7 @@ int main(int argc, char *argv[]) {
             if (current_line < line_count - 1) {
                 current_line++;
                 int max_displayable_lines = LINES - 4;
-                int available_width = COLS - 6;
+                int available_width = COLS - 7;
                 int visual_row_index = 0;
                 for (int i = scroll_y; i <= current_line; i++) {
                     int l_len = strlen(lines[i]);
@@ -975,7 +1005,7 @@ int main(int argc, char *argv[]) {
             is_modified = 1;
 
             int max_displayable_lines = LINES - 4;
-            int available_width = COLS - 6;
+            int available_width = COLS - 7;
             int visual_row_index = 0;
             for (int i = scroll_y; i < current_line; i++) {
                 int l_len = strlen(lines[i]);
