@@ -2,6 +2,7 @@
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
  * Version: 1.1.19 (2026)
+ * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -105,6 +106,9 @@ static char *clipboard_line = NULL;
 
 /* Syntax highlight toggle */
 static int syntax_highlight_enabled = 1;
+
+/* Gutter + col-81 guide visibility toggle (F4) */
+static int gutter_visible = 1;
 
 /* ---------- undo / redo ----------
  *
@@ -622,21 +626,23 @@ void draw_screen() {
     int gutter_digits = 1;
     { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gutter_digits++; } }
     /* gutter layout: <digits> + 1 space + 1 marker + 1 space = digits+3 cols; text starts at digits+3 */
-    int gutter_width = gutter_digits + 3;
+    int gutter_width = gutter_visible ? (gutter_digits + 3) : 0;
 
     while (physical_row < 2 + max_displayable_lines && file_line_index < line_count) {
         move(physical_row, 0); clrtoeol();
 
-        if (file_line_index == current_line) {
-            attron(COLOR_PAIR(1));
-            mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
-            attroff(COLOR_PAIR(1));
-            attron(COLOR_PAIR(1) | A_BOLD);
-            mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
-            attroff(COLOR_PAIR(1) | A_BOLD);
-        } else {
-            mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
-            mvaddch(physical_row, gutter_digits + 1, ACS_VLINE);
+        if (gutter_visible) {
+            if (file_line_index == current_line) {
+                attron(COLOR_PAIR(1));
+                mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+                attroff(COLOR_PAIR(1));
+                attron(COLOR_PAIR(1) | A_BOLD);
+                mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
+                attroff(COLOR_PAIR(1) | A_BOLD);
+            } else {
+                mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+                mvaddch(physical_row, gutter_digits + 1, ACS_VLINE);
+            }
         }
 
         char *line = lines[file_line_index];
@@ -704,8 +710,8 @@ void draw_screen() {
         physical_row++;
     }
 
-    /* Column-81 margin guide */
-    if (COLS > 81) {
+    /* Column-81 margin guide (only when gutter is visible) */
+    if (gutter_visible && COLS > 81) {
         for (int r = 2; r < LINES - 2; r++) {
             chtype ch_at = mvinch(r, 81);
             if ((ch_at & A_CHARTEXT) == ' ') {
@@ -746,7 +752,7 @@ void draw_screen() {
 
     /* Cursor placement — gutter_width matches the dynamic gutter computed above */
     int gd2 = 1; { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd2++; } }
-    int gw2 = gd2 + 3;
+    int gw2 = gutter_visible ? (gd2 + 3) : 0;
     int text_width2 = COLS - 1 - gw2;
     int cursor_physical_row = 2;
     for (int i = scroll_y; i < current_line; i++) {
@@ -1060,6 +1066,7 @@ void show_help_window() {
         { "%",             "Jump to matching bracket",   0 },
         { "",              "",                            0 },
         { "VIEW",          NULL,                         1 },
+        { "F4",            "Toggle gutter / col-81",     0 },
         { "F5",            "Toggle syntax highlight",    0 },
         { "Ctrl+X",        "Toggle Insert/Overwrite",    0 },
         { "Ctrl+?",        "This help screen",           0 },
@@ -1283,6 +1290,11 @@ int main(int argc, char *argv[]) {
                 is_modified = 1;
             }
         }
+        else if (ch == KEY_F(4)) {
+            gutter_visible = !gutter_visible;
+            snprintf(status_msg, sizeof(status_msg), "Gutter %s.",
+                     gutter_visible ? "on" : "off");
+        }
         else if (ch == KEY_F(5)) {
             syntax_highlight_enabled = !syntax_highlight_enabled;
             snprintf(status_msg, sizeof(status_msg), "Syntax highlighting %s.",
@@ -1364,7 +1376,7 @@ int main(int argc, char *argv[]) {
                 /* rows 0 and 1 are header; rows LINES-2 and LINES-1 are status */
                 if (click_row >= 2 && click_row < LINES - 2) {
                     int gd_m=1; { int tmp=line_count; while(tmp>=10){tmp/=10;gd_m++;} }
-                    int gw_m = gd_m + 3;
+                    int gw_m = gutter_visible ? (gd_m + 3) : 0;
                     int text_width = COLS - 1 - gw_m;
                     /* Walk file lines from scroll_y, accumulating visual rows,
                      * to find which file line and column the click lands on. */
@@ -1415,8 +1427,8 @@ int main(int argc, char *argv[]) {
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;}
-                int available_width = COLS - 1 - (gd_u + 3);
+                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;} 
+                int available_width = COLS - 1 - (gutter_visible ? (gd_u + 3) : 0);
                 int visual_rows_above = 0;
                 for (int i = scroll_y; i < current_line; i++) {
                     int l_len = strlen(lines[i]);
@@ -1441,7 +1453,7 @@ int main(int argc, char *argv[]) {
                 current_line++;
                 int max_displayable_lines = LINES - 4;
                 { int gd_d=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_d++;}
-                int available_width = COLS - 1 - (gd_d + 3);
+                int available_width = COLS - 1 - (gutter_visible ? (gd_d + 3) : 0);
                 int visual_row_index = 0;
                 for (int i = scroll_y; i <= current_line; i++) {
                     int l_len = strlen(lines[i]);
@@ -1599,7 +1611,7 @@ int main(int argc, char *argv[]) {
 
             int max_displayable_lines = LINES - 4;
             { int gd_e=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_e++;}
-            int available_width = COLS - 1 - (gd_e + 3);
+            int available_width = COLS - 1 - (gutter_visible ? (gd_e + 3) : 0);
             int visual_row_index = 0;
             for (int i = scroll_y; i < current_line; i++) {
                 int l_len = strlen(lines[i]);
