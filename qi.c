@@ -8,6 +8,7 @@
  * interactive search and replace, multi-line deletion tools, visual state
  * change tracking, and multi-language syntax highlighting.
  */
+#define _XOPEN_SOURCE 700
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -18,8 +19,57 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <locale.h>
+#include <wchar.h>
 #include "tracker.h"
 #include "syntax.h"
+
+/* ---------- UTF-8 display-width helper ----------
+ * Returns the number of terminal columns needed to display the string s.
+ * Multi-byte UTF-8 sequences are decoded; each codepoint contributes
+ * wcwidth() columns (1 for most, 2 for wide CJK, 0 for combining).
+ * Undecodable bytes are counted as 1 column each.
+ * NOTE: cursor_x and all editing paths remain byte-indexed; only
+ * wrap/row-count calculations use this function.  Convert individual
+ * features to column-awareness as they are touched in future changes.
+ */
+static int utf8_display_width(const char *s) {
+    if (!s) return 0;
+    int cols = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        wchar_t wc;
+        int bytes;
+        if (*p < 0x80) {
+            wc = *p; bytes = 1;
+        } else if ((*p & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
+            wc = ((*p & 0x1F) << 6) | (p[1] & 0x3F); bytes = 2;
+        } else if ((*p & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+            wc = ((*p & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F); bytes = 3;
+        } else if ((*p & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) {
+            wc = ((*p & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F); bytes = 4;
+        } else {
+            /* Invalid/partial byte — count as 1 column */
+            cols++; p++; continue;
+        }
+        int w = wcwidth(wc);
+        cols += (w >= 0) ? w : 1;
+        p += bytes;
+    }
+    return cols;
+}
+
+/* utf8_display_width for a prefix of n bytes */
+static int utf8_display_width_n(const char *s, int n) {
+    if (!s || n <= 0) return 0;
+    char *tmp = malloc(n + 1);
+    if (!tmp) return n;
+    memcpy(tmp, s, n);
+    tmp[n] = '\0';
+    int w = utf8_display_width(tmp);
+    free(tmp);
+    return w;
+}
 
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -647,6 +697,7 @@ void draw_screen() {
 
         char *line = lines[file_line_index];
         int len = strlen(line);
+        int disp_len = utf8_display_width(line);  /* display columns, not bytes */
         int current_phys_row = physical_row;
         int current_phys_col = gutter_width;
 
@@ -661,7 +712,7 @@ void draw_screen() {
 
         /* Render character by character, applying span colours */
         /* Show '>' at right edge of first visual row if line extends beyond terminal */
-        if (len > wrap_col - gutter_width) {
+        if (disp_len > wrap_col - gutter_width) {
             attron(A_DIM);
             mvaddch(physical_row, wrap_col - 1, '>');
             attroff(A_DIM);
@@ -669,7 +720,8 @@ void draw_screen() {
         }
 
         int span_idx = 0;
-        for (int j = 0; j < len; j++) {
+        int j = 0;  /* byte index */
+        while (j < len) {
             if (current_phys_col >= wrap_col) {
                 current_phys_row++; current_phys_col = gutter_width;
                 if (current_phys_row < 2 + max_displayable_lines) {
@@ -677,15 +729,27 @@ void draw_screen() {
                     clrtoeol();
                 } else break;
             }
+            /* Determine byte length of this UTF-8 codepoint */
+            unsigned char ub = (unsigned char)line[j];
+            int clen = 1;
+            if      ((ub & 0xF8) == 0xF0) clen = 4;
+            else if ((ub & 0xF0) == 0xE0) clen = 3;
+            else if ((ub & 0xE0) == 0xC0) clen = 2;
+            /* Clamp to remaining bytes */
+            if (j + clen > len) clen = len - j;
+            /* Display width of this codepoint */
+            int cw = utf8_display_width_n(line + j, clen);
+            if (cw < 1) cw = 1;
             /* Bracket highlight takes priority */
             int is_bracket_cursor = (file_line_index == current_line && j == cursor_x &&
                                      match_line >= 0);
             int is_bracket_match  = (file_line_index == match_line && j == match_col);
             if (is_bracket_cursor || is_bracket_match) {
                 attron(COLOR_PAIR(7) | A_BOLD);
-                printw("%c", line[j]);
+                for (int b = 0; b < clen; b++) printw("%c", line[j + b]);
                 attroff(COLOR_PAIR(7) | A_BOLD);
-                current_phys_col++;
+                current_phys_col += cw;
+                j += clen;
                 continue;
             }
             /* Advance past expired spans */
@@ -696,9 +760,10 @@ void draw_screen() {
             if (span_idx < nspans && j >= spans[span_idx].start && j < spans[span_idx].end)
                 pair = tok_pair[spans[span_idx].type];
             if (pair) attron(COLOR_PAIR(pair));
-            printw("%c", line[j]);
+            for (int b = 0; b < clen; b++) printw("%c", line[j + b]);
             if (pair) attroff(COLOR_PAIR(pair));
-            current_phys_col++;
+            current_phys_col += cw;
+            j += clen;
         }
         physical_row = current_phys_row + 1;
         file_line_index++;
@@ -756,8 +821,8 @@ void draw_screen() {
     int text_width2 = COLS - 1 - gw2;
     int cursor_physical_row = 2;
     for (int i = scroll_y; i < current_line; i++) {
-        int l_len = strlen(lines[i]);
-        int l_rows = (l_len == 0) ? 1 : (l_len / text_width2) + 1;
+        int l_dw = utf8_display_width(lines[i]);
+        int l_rows = (l_dw == 0) ? 1 : (l_dw / text_width2) + 1;
         cursor_physical_row += l_rows;
     }
     cursor_physical_row += (cursor_x / text_width2);
@@ -1161,6 +1226,7 @@ void show_help_window() {
 
 /* ---------- main ---------- */
 int main(int argc, char *argv[]) {
+    setlocale(LC_ALL, "");  /* enable UTF-8 locale for wcwidth() */
     struct termios tty;
     if (tcgetattr(STDIN_FILENO, &tty) == 0) {
         tty.c_iflag &= ~IXON;
@@ -1383,7 +1449,7 @@ int main(int argc, char *argv[]) {
                     int phys = 2;
                     int found = 0;
                     for (int i = scroll_y; i < line_count && phys < LINES - 2; i++) {
-                        int ll = (int)strlen(lines[i]);
+                        int ll = utf8_display_width(lines[i]);
                         int vrows = (ll == 0) ? 1 : (ll / text_width) + 1;
                         if (click_row < phys + vrows) {
                             /* click is within this file line */
@@ -1431,16 +1497,16 @@ int main(int argc, char *argv[]) {
                 int available_width = COLS - 1 - (gutter_visible ? (gd_u + 3) : 0);
                 int visual_rows_above = 0;
                 for (int i = scroll_y; i < current_line; i++) {
-                    int l_len = strlen(lines[i]);
-                    visual_rows_above += (l_len == 0) ? 1 : (l_len / available_width) + 1;
+                    int l_dw = utf8_display_width(lines[i]);
+                    visual_rows_above += (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
                 }
                 if (visual_rows_above < 3 && scroll_y > 0) {
                     while (scroll_y > 0 && visual_rows_above < 3) {
                         scroll_y--;
                         visual_rows_above = 0;
                         for (int i = scroll_y; i < current_line; i++) {
-                            int l_len = strlen(lines[i]);
-                            visual_rows_above += (l_len == 0) ? 1 : (l_len / available_width) + 1;
+                            int l_dw = utf8_display_width(lines[i]);
+                            visual_rows_above += (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
                         }
                     }
                 } }
@@ -1456,10 +1522,10 @@ int main(int argc, char *argv[]) {
                 int available_width = COLS - 1 - (gutter_visible ? (gd_d + 3) : 0);
                 int visual_row_index = 0;
                 for (int i = scroll_y; i <= current_line; i++) {
-                    int l_len = strlen(lines[i]);
-                    int l_rows = (l_len == 0) ? 1 : (l_len / available_width) + 1;
+                    int l_dw = utf8_display_width(lines[i]);
+                    int l_rows = (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
                     if (i < current_line) visual_row_index += l_rows;
-                    else visual_row_index += (cursor_x / available_width);
+                    else visual_row_index += (utf8_display_width_n(lines[i], cursor_x) / available_width);
                 }
                 if (max_displayable_lines - visual_row_index <= 3) {
                     scroll_y++;
@@ -1614,8 +1680,8 @@ int main(int argc, char *argv[]) {
             int available_width = COLS - 1 - (gutter_visible ? (gd_e + 3) : 0);
             int visual_row_index = 0;
             for (int i = scroll_y; i < current_line; i++) {
-                int l_len = strlen(lines[i]);
-                visual_row_index += (l_len == 0) ? 1 : (l_len / available_width) + 1;
+                int l_dw = utf8_display_width(lines[i]);
+                visual_row_index += (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
             }
             if (max_displayable_lines - visual_row_index <= 3) {
                 scroll_y++;
