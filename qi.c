@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.2 (2026)
+ * Version: 1.1.3 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.2"
+#define VERSION "1.1.3"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -102,6 +102,10 @@ int mod_count = 0;
 int overwrite_mode = 0;
 clock_t last_char_time = 0;
 int in_paste_stream = 0;
+
+/* Bracket match highlight: -1 means no active match */
+int match_line = -1;
+int match_col  = -1;
 
 void save_undo_state_single(int line_idx) {
     if (undo_stack_top >= MAX_UNDO - 1) {
@@ -303,6 +307,57 @@ void auto_save() {
     }
 }
 
+/* ---------- bracket matching ---------- */
+
+/* Search forward or backward through lines[] for the bracket that closes/opens
+ * the one at (start_line, start_col). Writes the result into match_line/match_col.
+ * Returns 1 on success, 0 if no match found. */
+static int find_matching_bracket(int start_line, int start_col) {
+    const char *open  = "([{";
+    const char *close = ")]}";
+    char ch = lines[start_line][start_col];
+    int dir = 0;   /* +1 = forward, -1 = backward */
+    char target = 0;
+
+    for (int i = 0; i < 3; i++) {
+        if (ch == open[i])  { dir =  1; target = close[i]; break; }
+        if (ch == close[i]) { dir = -1; target = open[i];  break; }
+    }
+    if (dir == 0) return 0;
+
+    int depth = 1;
+    int l = start_line, c = start_col + dir;
+
+    while (l >= 0 && l < line_count) {
+        int len = (int)strlen(lines[l]);
+        while (c >= 0 && c < len) {
+            char cur = lines[l][c];
+            if (cur == ch)     depth++;
+            else if (cur == target) {
+                depth--;
+                if (depth == 0) { match_line = l; match_col = c; return 1; }
+            }
+            c += dir;
+        }
+        l += dir;
+        if (l >= 0 && l < line_count)
+            c = (dir == 1) ? 0 : (int)strlen(lines[l]) - 1;
+    }
+    return 0;
+}
+
+/* Called each frame: update match_line/match_col based on cursor position. */
+static void update_bracket_match(void) {
+    match_line = -1; match_col = -1;
+    if (current_line < 0 || current_line >= line_count) return;
+    int len = (int)strlen(lines[current_line]);
+    if (cursor_x < 0 || cursor_x >= len) return;
+    char ch = lines[current_line][cursor_x];
+    if (ch == '(' || ch == ')' || ch == '[' ||
+        ch == ']' || ch == '{' || ch == '}')
+        find_matching_bracket(current_line, cursor_x);
+}
+
 /* ---------- screen rendering ---------- */
 void draw_screen() {
     start_color();
@@ -312,6 +367,9 @@ void draw_screen() {
     init_pair(4, COLOR_MAGENTA, COLOR_BLACK);
     init_pair(5, COLOR_GREEN, COLOR_BLACK);
     init_pair(6, COLOR_YELLOW, COLOR_BLACK);
+    init_pair(7, COLOR_BLACK, COLOR_YELLOW);  /* bracket highlight: black on yellow */
+
+    update_bracket_match();
 
     move(0, 0); clrtoeol();
     attron(COLOR_PAIR(1));
@@ -368,6 +426,17 @@ void draw_screen() {
                     move(current_phys_row, current_phys_col);
                     clrtoeol();
                 } else break;
+            }
+            /* Bracket highlight takes priority */
+            int is_bracket_cursor = (file_line_index == current_line && j == cursor_x &&
+                                     match_line >= 0);
+            int is_bracket_match  = (file_line_index == match_line && j == match_col);
+            if (is_bracket_cursor || is_bracket_match) {
+                attron(COLOR_PAIR(7) | A_BOLD);
+                printw("%c", line[j]);
+                attroff(COLOR_PAIR(7) | A_BOLD);
+                current_phys_col++;
+                continue;
             }
             /* Advance past expired spans */
             while (span_idx < nspans && spans[span_idx].end <= j)
@@ -821,6 +890,22 @@ int main(int argc, char *argv[]) {
             int max_displayable_lines = LINES - 4;
             scroll_y = current_line - max_displayable_lines + 1;
             if (scroll_y < 0) scroll_y = 0;
+        }
+        else if (ch == '%') {
+            /* Jump to matching bracket */
+            if (find_matching_bracket(current_line, cursor_x)) {
+                current_line = match_line;
+                cursor_x    = match_col;
+                /* Scroll so the destination is visible */
+                int mdl = LINES - 4;
+                if (current_line < scroll_y)
+                    scroll_y = current_line;
+                else if (current_line >= scroll_y + mdl)
+                    scroll_y = current_line - mdl + 1;
+                if (scroll_y < 0) scroll_y = 0;
+            } else {
+                snprintf(status_msg, sizeof(status_msg), "No matching bracket.");
+            }
         }
         else if (ch == KEY_UP) {
             if (current_line > 0) {
