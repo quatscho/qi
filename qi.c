@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.12 (2026)
+ * Version: 1.1.13 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.12"
+#define VERSION "1.1.13"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -685,10 +685,11 @@ void draw_screen() {
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
         attroff(COLOR_PAIR(1));
     } else {
+        int vis_col = (cursor_x % (COLS - 7)) + 1;
         if (!is_modified) {
             mvprintw(LINES - 1, 0,
-                "qi text editor, v.%s (c) 2026, Christopher Camacho | Cur: %d/%d | (^? for Help)",
-                VERSION, current_line + 1, cursor_x + 1);
+                "qi text editor, v.%s (c) 2026, Christopher Camacho | Ln: %d Col: %d | (^? for Help)",
+                VERSION, current_line + 1, vis_col);
         } else {
             int total_chars = 0, modified_lines = 0;
             for (int i = 0; i < line_count; i++) {
@@ -696,8 +697,8 @@ void draw_screen() {
                 if (tracker_is_modified(i, 0)) modified_lines++;
             }
             mvprintw(LINES - 1, 0,
-                "Lines Mod: %d | Total Chars: %d | Cur: %d/%d | (^? for Help)",
-                modified_lines, total_chars, current_line + 1, cursor_x + 1);
+                "Lines Mod: %d | Total Chars: %d | Ln: %d Col: %d | (^? for Help)",
+                modified_lines, total_chars, current_line + 1, vis_col);
         }
     }
 
