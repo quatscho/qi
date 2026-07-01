@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.9 (2026)
+ * Version: 1.1.10 (2026)
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
@@ -21,7 +21,7 @@
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.9"
+#define VERSION "1.1.10"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -451,14 +451,30 @@ void interactive_open() {
 void save_file() {
     if (strcmp(current_filename, "untitled.txt") == 0) {
         char filename[256];
-        echo(); noraw();
-        mvprintw(LINES - 1, 0, "Enter filename to save: ");
-        clrtoeol(); refresh();
-        getstr(filename);
-        noecho(); raw();
-        if (strlen(filename) > 0)
-            strncpy(current_filename, filename, 256);
-        else return;
+        int fidx = 0;
+        filename[0] = '\0';
+        const char *prompt = "Enter filename to save: ";
+        int prompt_len = (int)strlen(prompt);
+        noecho();
+        mvprintw(LINES - 1, 0, "%s", prompt); clrtoeol(); refresh();
+        while (fidx < (int)sizeof(filename) - 1) {
+            int c = getch();
+            if (c == 27) { status_msg[0] = '\0'; return; }
+            else if (c == 10 || c == 13) break;
+            else if (c == KEY_BACKSPACE || c == 127 || c == 8) {
+                if (fidx > 0) {
+                    fidx--; filename[fidx] = '\0';
+                    mvprintw(LINES - 1, prompt_len + fidx, " ");
+                    move(LINES - 1, prompt_len + fidx); refresh();
+                }
+            } else if (c >= 32 && c <= 126) {
+                filename[fidx++] = (char)c; filename[fidx] = '\0';
+                mvprintw(LINES - 1, prompt_len + fidx - 1, "%c", c); refresh();
+            }
+        }
+        if (fidx == 0) return;
+        strncpy(current_filename, filename, sizeof(current_filename) - 1);
+        current_filename[sizeof(current_filename) - 1] = '\0';
     }
     FILE *fp = fopen(current_filename, "w");
     if (fp) {
@@ -818,7 +834,7 @@ void replace_text() {
     }
     if (match_count == 0) { snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str); return; }
 
-    save_undo_state_single(current_line);
+    save_undo_state_batch(0, line_count);
     int current_idx = 0, replaced_count = 0, force_all = 0;
     while (current_idx < match_count) {
         int ln = matches[current_idx].line;

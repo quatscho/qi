@@ -132,17 +132,17 @@ void syntax_scan(char **lines, int count) {
         const char *p = lines[i];
         int in_str = 0, in_chr = 0;
         while (*p) {
-            if (!inside && !in_str && !in_chr && p[0]=='/' && p[1]=='*') {
+            if (!inside && !in_str && !in_chr && p[0]=='/' && p[1] && p[1]=='*') {
                 inside = 1; p += 2; continue;
             }
-            if (inside && p[0]=='*' && p[1]=='/') {
+            if (inside && p[0]=='*' && p[1] && p[1]=='/') {
                 inside = 0; p += 2; continue;
             }
             if (!inside) {
                 if (!in_chr && p[0]=='"') in_str = !in_str;
                 if (!in_str && p[0]=='\'') in_chr = !in_chr;
                 /* line comment ends the scan for this line */
-                if (!in_str && !in_chr && p[0]=='/' && p[1]=='/') break;
+                if (!in_str && !in_chr && p[0]=='/' && p[1] && p[1]=='/') break;
             }
             p++;
         }
@@ -260,7 +260,7 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
         int in_str = 0; char str_ch = 0;
         for (; j < len; j++) {
             /* -- line comment */
-            if (!in_str && line[j]=='-' && line[j+1]=='-') {
+            if (!in_str && line[j]=='-' && j+1<len && line[j+1]=='-') {
                 n = add_span(spans, n, j, len, TOK_COMMENT);
                 return n;
             }
@@ -282,7 +282,7 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
     if (current_lang == LANG_JAVASCRIPT) {
         int j=0; int in_str=0; char str_ch=0;
         for(;j<len;j++){
-            if(!in_str && line[j]=='/' && line[j+1]=='/'){
+            if(!in_str && line[j]=='/' && j+1<len && line[j+1]=='/'){
                 n=add_span(spans,n,j,len,TOK_COMMENT); return n;
             }
             if(!in_str && (line[j]=='"'||line[j]=='\''||line[j]=='`')){
@@ -302,7 +302,7 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
     if (current_lang == LANG_RUST) {
         int j=0; int in_str=0;
         for(;j<len;j++){
-            if(!in_str && line[j]=='/' && line[j+1]=='/'){
+            if(!in_str && line[j]=='/' && j+1<len && line[j+1]=='/'){
                 n=add_span(spans,n,j,len,TOK_COMMENT); return n;
             }
             if(!in_str && line[j]=='"'){
@@ -346,18 +346,18 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
 
     for (; j < len; j++) {
         /* block comment open */
-        if (!in_str && !in_chr && line[j]=='/' && line[j+1]=='*') {
+        if (!in_str && !in_chr && line[j]=='/' && j+1<len && line[j+1]=='*') {
             int s = j;
             j += 2;
             while (j < len) {
-                if (line[j]=='*' && line[j+1]=='/') { j+=2; break; }
+                if (line[j]=='*' && j+1<len && line[j+1]=='/') { j+=2; break; }
                 j++;
             }
             n = add_span(spans, n, s, j, TOK_COMMENT);
             j--; continue;
         }
         /* line comment */
-        if (!in_str && !in_chr && line[j]=='/' && line[j+1]=='/') {
+        if (!in_str && !in_chr && line[j]=='/' && j+1<len && line[j+1]=='/') {
             n = add_span(spans, n, j, len, TOK_COMMENT);
             return n;
         }
