@@ -15,6 +15,7 @@ typedef enum {
     LANG_LUA,
     LANG_JAVASCRIPT,
     LANG_RUST,
+    LANG_PHP,
 } Language;
 
 static Language current_lang = LANG_NONE;
@@ -67,6 +68,20 @@ static const char *kw_js[] = {
     NULL
 };
 
+static const char *kw_php[] = {
+    "abstract","and","array","as","break","callable","case","catch","class",
+    "clone","const","continue","declare","default","die","do","echo","else",
+    "elseif","empty","enddeclare","endfor","endforeach","endif","endswitch",
+    "endwhile","eval","exit","extends","final","finally","fn","for",
+    "foreach","function","global","goto","if","implements","include",
+    "include_once","instanceof","insteadof","interface","isset","list",
+    "match","namespace","new","null","or","print","private","protected",
+    "public","readonly","require","require_once","return","static","switch",
+    "throw","trait","try","unset","use","var","while","xor","yield",
+    "true","false","NULL","TRUE","FALSE",
+    NULL
+};
+
 static const char *kw_rust[] = {
     "as","async","await","break","const","continue","crate","dyn","else",
     "enum","extern","false","fn","for","if","impl","in","let","loop","match",
@@ -111,6 +126,10 @@ void syntax_set_file(const char *filename) {
         current_lang = LANG_JAVASCRIPT;
     else if (strcmp(ext,"rs")==0)
         current_lang = LANG_RUST;
+    else if (strcmp(ext,"php")==0 || strcmp(ext,"php3")==0 ||
+             strcmp(ext,"php4")==0 || strcmp(ext,"php5")==0 ||
+             strcmp(ext,"phtml")==0)
+        current_lang = LANG_PHP;
 }
 
 /* ---------- block-comment pre-scan (C only) ---------- */
@@ -124,7 +143,7 @@ void syntax_scan(char **lines, int count) {
         memset(in_block, 0, in_block_cap);
     }
 
-    if (current_lang != LANG_C || !in_block) return;
+    if ((current_lang != LANG_C && current_lang != LANG_PHP) || !in_block) return;
 
     int inside = 0;
     for (int i = 0; i < count; i++) {
@@ -293,6 +312,63 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
             int kl=0;
             if(match_keyword(line,j,len,kw_js,&kl)){
                 n=add_span(spans,n,j,j+kl,TOK_KEYWORD); j+=kl-1;
+            }
+        }
+        return n;
+    }
+
+    /* --- PHP --- */
+    if (current_lang == LANG_PHP) {
+        int j=0; int in_str=0; char str_ch=0;
+        /* block-comment state */
+        int inside_block_php = (in_block && line_idx < in_block_cap) ? in_block[line_idx] : 0;
+        if (inside_block_php) {
+            const char *close = strstr(line, "*/");
+            if (!close) return add_span(spans, n, 0, len, TOK_COMMENT);
+            int ce = (int)(close - line) + 2;
+            n = add_span(spans, n, 0, ce, TOK_COMMENT);
+            j = ce;
+        }
+        for(;j<len;j++){
+            /* block comment */
+            if(!in_str && line[j]=='/' && j+1<len && line[j+1]=='*'){
+                int s=j; j+=2;
+                while(j<len){if(line[j]=='*'&&j+1<len&&line[j+1]=='/'){j+=2;break;}j++;}
+                n=add_span(spans,n,s,j,TOK_COMMENT); j--; continue;
+            }
+            /* line comment // */
+            if(!in_str && line[j]=='/' && j+1<len && line[j+1]=='/'){
+                n=add_span(spans,n,j,len,TOK_COMMENT); return n;
+            }
+            /* line comment # */
+            if(!in_str && line[j]=='#'){
+                n=add_span(spans,n,j,len,TOK_COMMENT); return n;
+            }
+            /* PHP open/close tags as preprocessor */
+            if(!in_str && line[j]=='<' && j+4<len && strncmp(line+j,"<?php",5)==0){
+                n=add_span(spans,n,j,j+5,TOK_PREPROC); j+=4; continue;
+            }
+            if(!in_str && line[j]=='<' && j+1<len && line[j+1]=='?'){
+                n=add_span(spans,n,j,j+2,TOK_PREPROC); j+=1; continue;
+            }
+            if(!in_str && line[j]=='?' && j+1<len && line[j+1]=='>'){
+                n=add_span(spans,n,j,j+2,TOK_PREPROC); j+=1; continue;
+            }
+            /* strings */
+            if(!in_str && (line[j]=='"'||line[j]=='\'' )){
+                in_str=1; str_ch=line[j]; int s=j; j++;
+                while(j<len){if(line[j]=='\\'){j+=2;continue;}if(line[j]==str_ch){j++;break;}j++;}
+                n=add_span(spans,n,s,j,TOK_STRING); in_str=0; j--; continue;
+            }
+            /* variables: $identifier */
+            if(!in_str && line[j]=='$' && j+1<len && (isalpha((unsigned char)line[j+1])||line[j+1]=='_')){
+                int s=j; j++;
+                while(j<len&&(isalnum((unsigned char)line[j])||line[j]=='_')) j++;
+                n=add_span(spans,n,s,j,TOK_PREPROC); j--; continue;
+            }
+            int kl=0;
+            if(match_keyword(line,j,len,kw_php,&kl)){
+                n=add_span(spans,n,j,j+kl,TOK_KEYWORD); j+=kl-1; continue;
             }
         }
         return n;
