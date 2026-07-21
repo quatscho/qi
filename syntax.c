@@ -103,6 +103,16 @@ void syntax_set_file(const char *filename) {
         current_lang = LANG_MAKEFILE; return;
     }
 
+    /* Check for shell dotfiles / rc files */
+    if (strcmp(base, ".zshrc") == 0 || strcmp(base, "zshrc") == 0 ||
+	strcmp(base, ".zshenv") == 0 || strcmp(base, "zshenv") == 0 ||
+	strcmp(base, ".zprofile") == 0 || strcmp(base, "zprofile") == 0 ||
+	strcmp(base, ".bashrc") == 0 || strcmp(base, "bashrc") == 0 ||
+	strcmp(base, ".bash_profile") == 0 || strcmp(base, "bash_profile") ==0 ||
+	strcmp(base, ".profile") == 0 || strcmp(base, "profile") == 0 ) {
+		current_lang = LANG_SHELL; return;
+    	}
+
     const char *ext = strrchr(base, '.');
     if (!ext) return;
     ext++; /* skip the dot */
@@ -114,7 +124,8 @@ void syntax_set_file(const char *filename) {
     else if (strcmp(ext,"py")==0 || strcmp(ext,"pyw")==0)
         current_lang = LANG_PYTHON;
     else if (strcmp(ext,"sh")==0 || strcmp(ext,"bash")==0 ||
-             strcmp(ext,"zsh")==0 || strcmp(ext,"ksh")==0)
+             strcmp(ext,"zsh")==0 || strcmp(ext,"ksh")==0 ||
+	     strcmp(ext,"zshrc")==0 || strcmp(ext,"bashrc")==0)
         current_lang = LANG_SHELL;
     else if (strcmp(ext,"md")==0 || strcmp(ext,"markdown")==0)
         current_lang = LANG_MARKDOWN;
