@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.25 (2026)
+ * Version: 1.1.26 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -23,7 +23,6 @@
 #include <wchar.h>
 #include "tracker.h"
 #include "syntax.h"
-#include "trump.h"
 
 /* ---------- UTF-8 display-width helper ----------
  * Returns the number of terminal columns needed to display the string s.
@@ -1757,15 +1756,6 @@ int main(int argc, char *argv[]) {
             cursor_x++; is_modified = 1;
             mod_count++;
             if (mod_count >= 50) { auto_save(); mod_count = 0; }
-            /* Easter egg: #trump triggers the trump window */
-            {
-                int cln = (int)strlen(lines[current_line]);
-                if (cln >= 7 &&
-                    strcmp(lines[current_line] + cln - 7, "#trump ") == 0) {
-                    show_trump_window();
-                    touchwin(stdscr); refresh();
-                }
-            }
         }
     } /* end while(1) */
 
