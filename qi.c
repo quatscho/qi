@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.26 (2026)
+ * Version: 1.1.27 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -1030,71 +1030,103 @@ void goto_line() {
 /* ---------- delete lines ---------- */
 void delete_lines_interactive() {
     char input[256]; int idx = 0; input[0] = '\0';
-    const char *prompt = "Delete lines (e.g., 3, 5, 10-25): "; int prompt_len = strlen(prompt);
-    echo(); mvprintw(LINES-1,0,"%s",prompt); clrtoeol(); refresh();
-    while (idx < (int)sizeof(input) - 1) {
-        int ch = getch();
-        if (ch == 27) { noecho(); status_msg[0]='\0'; return; }
-        else if (ch == 10 || ch == 13) break;
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) { idx--; input[idx]='\0'; mvprintw(LINES-1,prompt_len+idx," "); move(LINES-1,prompt_len+idx); refresh(); }
-        } else if (ch >= 32 && ch <= 126) { input[idx++]=(char)ch; input[idx]='\0'; }
-    }
-    noecho();
-    if (strlen(input) == 0) return;
+        const char *prompt = "Delete lines (e.g., 3, 5, 10-25 or !20-25): "; int prompt_len = strlen(prompt);
 
-    char saved_input_copy[256];
-    strncpy(saved_input_copy, input, sizeof(saved_input_copy) - 1);
-    saved_input_copy[sizeof(saved_input_copy)-1] = '\0';
+                /* Keep noecho active so ncurses never prints ^D or control characters */
+                    noecho();
+                        mvprintw(LINES - 1, 0, "\045s", prompt);
+                            clrtoeol();
+                                refresh();
 
-    /* Build deletion bitmap — use heap to avoid VLA issues on large files */
-    char *to_delete = calloc(line_count, sizeof(char));
-    if (!to_delete) return;
+                                    while (idx < (int)sizeof(input) - 1) {
+                                            int ch = getch();
+                                                    if (ch == 27) { status_msg[0] = '\0'; return; }
+                                                            else if (ch == 10 || ch == 13) break;
+                                                                    else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+                                                                                if (idx > 0) {
+                                                                                                idx--;
+                                                                                                                input[idx] = '\0';
+                                                                                                                                mvprintw(LINES - 1, prompt_len + idx, " ");
+                                                                                                                                                move(LINES - 1, prompt_len + idx);
+                                                                                                                                                                refresh();
+                                                                                                                                                                            }
+                                                                                                                                                                                    } else if (ch >= 32 && ch <= 126) {
+                                                                                                                                                                                                input[idx++] = (char)ch;
+                                                                                                                                                                                                            input[idx] = '\0';
+                                                                                                                                                                                                                        mvprintw(LINES - 1, prompt_len + idx - 1, "\045c", ch);
+                                                                                                                                                                                                                                    refresh();
+                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                                }
 
-    save_undo_state_batch(0, line_count);
+                                                                                                                                                                                                                                                    if (strlen(input) == 0) return;
 
-    char *token = strtok(input, ",");
-    while (token != NULL) {
-        while (*token == ' ') token++;
-        char *dash = strchr(token, '-');
-        if (dash) {
-            int start = atoi(token), end = atoi(dash + 1);
-            if (start > 0 && end >= start)
-                for (int i = start; i <= end && i <= line_count; i++) to_delete[i-1] = 1;
-        } else {
-            int ln = atoi(token);
-            if (ln > 0 && ln <= line_count) to_delete[ln-1] = 1;
-        }
-        token = strtok(NULL, ",");
-    }
+                                                                                                                                                                                                                                                        char saved_input_copy[256];
+                                                                                                                                                                                                                                                            strncpy(saved_input_copy, input, sizeof(saved_input_copy) - 1);
+                                                                                                                                                                                                                                                                saved_input_copy[sizeof(saved_input_copy) - 1] = '\0';
 
-    int deleted_count = 0;
-    for (int i = line_count - 1; i >= 0; i--) {
-        if (to_delete[i]) {
-            remove_line_at(i);
-            deleted_count++;
-            if (i <= current_line && current_line > 0) current_line--;
-        }
-    }
-    free(to_delete);
+                                                                                                                                                                                                                                                                    /* Build deletion bitmap  use heap to avoid VLA issues on large files */
+                                                                                                                                                                                                                                                                        char *to_delete = calloc(line_count, sizeof(char));
+                                                                                                                                                                                                                                                                            if (!to_delete) return;
 
-    if (line_count == 0) {
-        ensure_capacity(1); lines[0] = xstrdup(""); line_count = 1;
-        current_line = 0; cursor_x = 0;
-    }
-    int len = strlen(lines[current_line]);
-    if (cursor_x > len) cursor_x = len;
-    int max_displayable_lines = LINES - 4;
-    if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
-    if (scroll_y < 0) scroll_y = 0;
+                                                                                                                                                                                                                                                                                save_undo_state_batch(0, line_count);
 
-    if (deleted_count > 0) {
-        is_modified = 1;
-        snprintf(status_msg, sizeof(status_msg), "Deleted lines %s", saved_input_copy);
-    } else {
-        snprintf(status_msg, sizeof(status_msg), "No lines deleted.");
-    }
-}
+                                                                                                                                                                                                                                                                                    /* Check for leading '!' inversion operator */
+                                                                                                                                                                                                                                                                                        char *p = input;
+                                                                                                                                                                                                                                                                                            while (*p == ' ' || *p == '\t') p++; /* Skip leading whitespace */
+
+                                                                                                                                                                                                                                                                                                int invert = 0;
+                                                                                                                                                                                                                                                                                                    if (*p == '!') {
+                                                                                                                                                                                                                                                                                                            invert = 1;
+                                                                                                                                                                                                                                                                                                                    p++; /* Skip the '!' character */
+                                                                                                                                                                                                                                                                                                                        }
+
+                                                                                                                                                                                                                                                                                                                            char *token = strtok(p, ",");
+                                                                                                                                                                                                                                                                                                                                while (token != NULL) {
+                                                                                                                                                                                                                                                                                                                                        while (*token == ' ' || *token == '\t') token++;
+                                                                                                                                                                                                                                                                                                                                                int start = 0, end = 0;
+                                                                                                                                                                                                                                                                                                                                                        if (sscanf(token, "\045d-\045d", &start, &end) == 2) {
+                                                                                                                                                                                                                                                                                                                                                                    if (start > 0 && end >= start)
+                                                                                                                                                                                                                                                                                                                                                                                    for (int i = start; i <= end && i <= line_count; i++) to_delete[i - 1] = 1;
+                                                                                                                                                                                                                                                                                                                                                                                            } else if (sscanf(token, "\045d", &start) == 1) {
+                                                                                                                                                                                                                                                                                                                                                                                                        if (start > 0 && start <= line_count) to_delete[start - 1] = 1;
+                                                                                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                                                                                        token = strtok(NULL, ",");
+                                                                                                                                                                                                                                                                                                                                                                                                                            }
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                /* Apply '!' inversion if specified */
+                                                                                                                                                                                                                                                                                                                                                                                                                                    if (invert) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                            for (int i = 0; i < line_count; i++) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                        to_delete[i] = !to_delete[i];
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    }
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                        int deleted_count = 0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                            for (int i = line_count - 1; i >= 0; i--) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    if (to_delete[i]) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                remove_line_at(i);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            deleted_count++;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        if (i <= current_line && current_line > 0) current_line--;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        free(to_delete);
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            if (line_count == 0) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    ensure_capacity(1); lines[0] = xstrdup(""); line_count = 1;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            current_line = 0; cursor_x = 0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    int len = strlen(lines[current_line]);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        if (cursor_x > len) cursor_x = len;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            int max_displayable_lines = LINES - 4;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    if (scroll_y < 0) scroll_y = 0;
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        if (deleted_count > 0) {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                is_modified = 1;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        snprintf(status_msg, sizeof(status_msg), "Deleted lines \045s", saved_input_copy);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            } else {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    snprintf(status_msg, sizeof(status_msg), "No lines deleted.");
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        }
 
 /* ---------- help window ---------- */
 void show_help_window() {
