@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.27 (2026)
+ * Version: 1.1.28 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -1427,22 +1427,38 @@ int main(int argc, char *argv[]) {
             if (scroll_y < 0) scroll_y = 0;
         }
         else if (ch == CTRL_KEY('k')) {
-            /* Cut current line into clipboard */
+        /* Cut current line into clipboard */
             record_bulk(current_line, 1);
-            free(clipboard_line);
-            clipboard_line = xstrdup(lines[current_line]);
-            if (line_count > 1) {
-                remove_line_at(current_line);
-                if (current_line >= line_count) current_line = line_count - 1;
-            } else {
-                /* Last line: just clear it */
-                free(lines[0]); lines[0] = xstrdup("");
+
+            // Fix 1: Ensure we only copy if the line actually has content
+            if (lines[current_line] != NULL) {
+                 free(clipboard_line);
+                 clipboard_line = xstrdup(lines[current_line]);
+
+                 // Safety check for memory allocation/empty results
+                 if (clipboard_line == NULL || strlen(clipboard_line) == 0) {
+                      clipboard_line = strdup(""); // Fallback to empty string if null
+                 }
             }
+
+            if (line_count > 1) {
+                 remove_line_at(current_line);
+                 // Ensure current_line stays within bounds after the shift
+                 if (current_line >= line_count) {
+                      current_line = line_count - 1;
+                 }
+            } else {
+                 // For single-line files, clear content but maintain count
+                 free(lines[0]);
+                 lines[0] = xstrdup("");
+            }
+
             cursor_x = 0;
             if (current_line < scroll_y) scroll_y = current_line;
             is_modified = 1;
             snprintf(status_msg, sizeof(status_msg), "Line cut.");
         }
+
         else if (ch == CTRL_KEY('p')) {
             /* Paste clipboard line above current line */
             if (clipboard_line) {

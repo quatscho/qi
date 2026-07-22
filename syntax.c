@@ -16,6 +16,7 @@ typedef enum {
     LANG_JAVASCRIPT,
     LANG_RUST,
     LANG_PHP,
+    LANG_CSS,
 } Language;
 
 static Language current_lang = LANG_NONE;
@@ -90,6 +91,18 @@ static const char *kw_rust[] = {
     NULL
 };
 
+static const char *kw_css[] = {
+    "margin","padding","background","color","font","font-size","font-family",
+    "font-weight","display","flex","grid","position","top","right","bottom",
+    "left","width","height","max-width","max-height","min-width","min-height",
+    "border","border-radius","box-shadow","opacity","overflow","cursor",
+    "z-index","align-items","justify-content","flex-direction","transform",
+    "transition","animation","important","inherit","initial","unset","none",
+    "block","inline","inline-block","relative","absolute","fixed","sticky",
+    "auto","center","hidden","visible",
+    NULL
+};
+
 /* ---------- language detection ---------- */
 void syntax_set_file(const char *filename) {
     current_lang = LANG_NONE;
@@ -141,6 +154,8 @@ void syntax_set_file(const char *filename) {
              strcmp(ext,"php4")==0 || strcmp(ext,"php5")==0 ||
              strcmp(ext,"phtml")==0)
         current_lang = LANG_PHP;
+    else if (strcmp(ext,"css")==0)
+            current_lang = LANG_CSS;
 }
 
 /* ---------- block-comment pre-scan (C only) ---------- */
@@ -154,7 +169,7 @@ void syntax_scan(char **lines, int count) {
         memset(in_block, 0, in_block_cap);
     }
 
-    if ((current_lang != LANG_C && current_lang != LANG_PHP) || !in_block) return;
+    if ((current_lang != LANG_C && current_lang != LANG_PHP && current_lang != LANG_CSS) || !in_block) return;
 
     int inside = 0;
     for (int i = 0; i < count; i++) {
@@ -243,6 +258,71 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
         while (j < len && line[j] != ':' && line[j] != ' ') j++;
         if (j < len && line[j] == ':' && j > start)
             n = add_span(spans, n, start, j+1, TOK_KEYWORD);
+        return n;
+    }
+
+    /* --- CSS --- */
+    if (current_lang == LANG_CSS) {
+        int j = 0;
+        int inside_block_css = (in_block && line_idx < in_block_cap) ? in_block[line_idx] : 0;
+        if (inside_block_css) {
+            const char *close = strstr(line, "*/");
+            if (!close) return add_span(spans, n, 0, len, TOK_COMMENT);
+            int ce = (int)(close - line) + 2;
+            n = add_span(spans, n, 0, ce, TOK_COMMENT);
+            j = ce;
+        }
+
+        for (; j < len; j++) {
+            /* Block comment */
+            if (line[j] == '/' && j + 1 < len && line[j + 1] == '*') {
+                int s = j; j += 2;
+                while (j < len) {
+                    if (line[j] == '*' && j + 1 < len && line[j + 1] == '/') { j += 2; break; }
+                    j++;
+                }
+                n = add_span(spans, n, s, j, TOK_COMMENT);
+                j--; continue;
+            }
+            /* Strings */
+            if (line[j] == '"' || line[j] == '\'') {
+                char str_ch = line[j]; int s = j; j++;
+                while (j < len) {
+                    if (line[j] == '\\') { j += 2; continue; }
+                    if (line[j] == str_ch) { j++; break; }
+                    j++;
+                }
+                n = add_span(spans, n, s, j, TOK_STRING);
+                j--; continue;
+            }
+            /* At-rules (@media, @import, @keyframes, etc.) */
+            if (line[j] == '@') {
+                int s = j; j++;
+                while (j < len && (isalnum((unsigned char)line[j]) || line[j] == '-')) j++;
+                n = add_span(spans, n, s, j, TOK_PREPROC);
+                j--; continue;
+            }
+            /* Hex colors (#fff, #ffffff) or ID Selectors */
+            if (line[j] == '#') {
+                int s = j; j++;
+                while (j < len && (isxdigit((unsigned char)line[j]) || isalnum((unsigned char)line[j]) || line[j] == '-' || line[j] == '_')) j++;
+                n = add_span(spans, n, s, j, TOK_PREPROC);
+                j--; continue;
+            }
+            /* Class selectors (.class-name) */
+            if (line[j] == '.' && j + 1 < len && (isalpha((unsigned char)line[j + 1]) || line[j + 1] == '-' || line[j + 1] == '_')) {
+                int s = j; j++;
+                while (j < len && (isalnum((unsigned char)line[j]) || line[j] == '-' || line[j] == '_')) j++;
+                n = add_span(spans, n, s, j, TOK_KEYWORD);
+                j--; continue;
+            }
+            /* Keywords and properties */
+            int kl = 0;
+            if (match_keyword(line, j, len, kw_css, &kl)) {
+                n = add_span(spans, n, j, j + kl, TOK_KEYWORD);
+                j += kl - 1; continue;
+            }
+        }
         return n;
     }
 
@@ -422,7 +502,7 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
 
     /* if whole line is inside a block comment */
     if (inside_block) {
-        /* scan for closing */ 
+        /* scan for closing */
         const char *close = strstr(line, "*/");
         if (!close) return add_span(spans, n, 0, len, TOK_COMMENT);
         int close_end = (int)(close - line) + 2;
