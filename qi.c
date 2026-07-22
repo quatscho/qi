@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.24"
+#define VERSION "1.1.28"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
