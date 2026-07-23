@@ -135,6 +135,7 @@ int mod_count = 0;
 int overwrite_mode = 0;
 clock_t last_char_time = 0;
 int in_paste_stream = 0;
+static int is_pasting = 0;
 
 /* mtime of the file as last loaded/saved; 0 = untitled or unknown */
 static time_t file_mtime = 0;
@@ -1298,10 +1299,15 @@ int main(int argc, char *argv[]) {
     initscr();
     set_escdelay(25);
     raw();
+    noecho();
     keypad(stdscr, TRUE);
+
+    /* enable terminal bracketed paste mode */
+    printf("\033[?2004h");
+    fflush(stdout);
+
     start_color();
     init_pair(1, COLOR_YELLOW, COLOR_BLACK);
-    noecho();
     curs_set(1);
 #ifndef BUTTON5_PRESSED
 #define BUTTON5_PRESSED BUTTON2_PRESSED
@@ -1346,6 +1352,32 @@ int main(int argc, char *argv[]) {
     while (1) {
         draw_screen();
         int ch = getch();
+
+        if (ch == 27) { /* ESC key */
+            nodelay(stdscr, TRUE);
+            int next1 = getch();
+            int next2 = getch();
+
+            if (next1 == '[' && next2 == '2') {
+                char seq[16] = {0};
+                int idx = 0;
+                int c;
+                while ((c = getch()) != ERR && idx < 10) {
+                    seq[idx++] = c;
+                    if (c == '~') break;
+                }
+                if (strcmp(seq, "00~") == 0) {
+                    is_pasting = 1;
+                    nodelay(stdscr, FALSE);
+                    continue;
+                } else if (strcmp(seq, "01~") == 0) {
+                    is_pasting = 0;
+                    nodelay(stdscr, FALSE);
+                    continue;
+                }
+            }
+            nodelay(stdscr, FALSE);
+        }
 
         clock_t now = clock();
         double ms_since_last = ((double)(now - last_input_time) / CLOCKS_PER_SEC) * 1000.0;
@@ -1726,16 +1758,22 @@ int main(int argc, char *argv[]) {
                 is_modified = 1;
             }
         }
-        else if (ch == 10 || ch == 13) {
+         else if (ch == 10 || ch == 13) {
             /* Enter — record line split */
             if (!paste_batch_active) record_line_split(current_line, cursor_x);
+
             /* Measure leading whitespace of the current line for auto-indent */
             int indent_len = 0;
-            while (lines[current_line][indent_len] == ' ' ||
-                   lines[current_line][indent_len] == '\t')
-                indent_len++;
-            /* Only auto-indent if cursor is at or past the indented region */
-            if (cursor_x < indent_len) indent_len = 0;
+
+            /* STEP 2B: Only calculate auto-indent if NOT currently pasting */
+            if (!is_pasting) {
+                while (lines[current_line][indent_len] == ' ' ||
+                       lines[current_line][indent_len] == '\t')
+                    indent_len++;
+                /* Only auto-indent if cursor is at or past the indented region */
+                if (cursor_x < indent_len) indent_len = 0;
+            }
+
             char *tail_text = lines[current_line] + cursor_x;
             int tail_len = (int)strlen(tail_text);
             char *new_line = malloc(indent_len + tail_len + 1);
@@ -1842,6 +1880,11 @@ int main(int argc, char *argv[]) {
     tracker_free();
     for (int i = 0; i < line_count; i++) free(lines[i]);
     free(lines);
+
+    /* disable bracketed paste mode before exiting */
+    printf("\033[?20041");
+    fflush(stdout);
+
     endwin();
     return 0;
 }
