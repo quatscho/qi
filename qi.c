@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.28 (2026)
+ * Version: 1.1.29 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.28"
+#define VERSION "1.1.29"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -841,8 +841,12 @@ void find_text() {
     search_str[0] = '\0';
     const char *prompt = "Find: ";
     int prompt_len = strlen(prompt);
+
     noecho();
-    mvprintw(LINES - 1, 0, "%s", prompt); clrtoeol(); refresh();
+    mvprintw(LINES - 1, 0, "\045s", prompt);
+    clrtoeol();
+    refresh();
+
     while (idx < (int)sizeof(search_str) - 1) {
         int ch = getch();
         if (ch == 27) { status_msg[0] = '\0'; return; }
@@ -855,7 +859,7 @@ void find_text() {
             }
         } else if (ch >= 32 && ch <= 126) {
             search_str[idx++] = (char)ch; search_str[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch); refresh();
+            mvprintw(LINES - 1, prompt_len + idx - 1, "\045c", ch); refresh();
         }
     }
     if (strlen(search_str) == 0) return;
@@ -863,6 +867,7 @@ void find_text() {
     struct { int line; int col; } matches[500];
     int match_count = 0, current_match_idx = 0;
 
+    /* Build match list across the entire file */
     for (int i = 0; i < line_count; i++) {
         char lower_line[MAX_LINE_LEN], lower_search[128];
         int ll = strlen(lines[i]);
@@ -884,10 +889,24 @@ void find_text() {
             ptr++;
         }
     }
+
     if (match_count == 0) {
-        snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str);
+        snprintf(status_msg, sizeof(status_msg), "No matches found for '\045s'.", search_str);
         return;
     }
+
+    /* Start navigation from the first match at or after the current cursor position */
+    int start_idx = 0;
+    for (int k = 0; k < match_count; k++) {
+        if (matches[k].line > current_line ||
+           (matches[k].line == current_line && matches[k].col >= cursor_x)) {
+            start_idx = k;
+            break;
+        }
+    }
+    current_match_idx = start_idx;
+
+    /* Interactive match navigation loop */
     while (1) {
         current_line = matches[current_match_idx].line;
         cursor_x = matches[current_match_idx].col;
@@ -896,17 +915,25 @@ void find_text() {
         if (scroll_y < 0) scroll_y = 0;
         if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
         if (scroll_y < 0) scroll_y = 0;
+
         draw_screen();
         snprintf(status_msg, sizeof(status_msg),
-                 "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]",
+                 "Match \045d of \045d [Next: Right/Down | Prev: Left/Up | Enter: Done]",
                  current_match_idx + 1, match_count);
         draw_screen();
+
         int ch = getch();
         if (ch == 10 || ch == 13) {
-            snprintf(status_msg, sizeof(status_msg), "Found match at line %d.", current_line + 1); break;
-        } else if (ch == 27) { status_msg[0] = '\0'; break; }
-        else if (ch == KEY_RIGHT || ch == KEY_DOWN) current_match_idx = (current_match_idx + 1) % match_count;
-        else if (ch == KEY_LEFT || ch == KEY_UP) current_match_idx = (current_match_idx - 1 + match_count) % match_count;
+            snprintf(status_msg, sizeof(status_msg), "Found match at line \045d.", current_line + 1);
+            break;
+        } else if (ch == 27) {
+            status_msg[0] = '\0';
+            break;
+        } else if (ch == KEY_RIGHT || ch == KEY_DOWN) {
+            current_match_idx = (current_match_idx + 1) % match_count;
+        } else if (ch == KEY_LEFT || ch == KEY_UP) {
+            current_match_idx = (current_match_idx - 1 + match_count) % match_count;
+        }
     }
 }
 
