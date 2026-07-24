@@ -1,13 +1,14 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.36 (2026)
+ * Version: 1.1.37 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
  * interactive search and replace, multi-line deletion tools, visual state
  * change tracking, and multi-language syntax highlighting.
  */
+
 #define _XOPEN_SOURCE 700
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,15 +25,88 @@
 #include "tracker.h"
 #include "syntax.h"
 
-/* ---------- UTF-8 display-width helper ----------
- * Returns the number of terminal columns needed to display the string s.
- * Multi-byte UTF-8 sequences are decoded; each codepoint contributes
- * wcwidth() columns (1 for most, 2 for wide CJK, 0 for combining).
- * Undecodable bytes are counted as 1 column each.
- * NOTE: cursor_x and all editing paths remain byte-indexed; only
- * wrap/row-count calculations use this function.  Convert individual
- * features to column-awareness as they are touched in future changes.
- */
+#define MAX_LINE_LEN 512
+#define CTRL_KEY(k) ((k) & 0x1f)
+#define MAX_UNDO 500
+#define UNDO_CAP MAX_UNDO
+#define VERSION "1.1.37"
+
+#ifndef BUTTON5_PRESSED
+#define BUTTON5_PRESSED BUTTON2_PRESSED
+#endif
+
+/* ---------- Undo/Redo Data Structures ---------- */
+typedef enum {
+    OP_CHAR_INS,
+    OP_CHAR_DEL,
+    OP_LINE_SPLIT,
+    OP_LINE_JOIN,
+    OP_BULK,
+} OpType;
+
+typedef struct {
+    OpType type;
+    int    line;        /* line index at time of operation        */
+    int    col;         /* column index (char ops and split/join) */
+    char   ch;          /* character (OP_CHAR_INS / OP_CHAR_DEL) */
+    char **bulk_lines;  /* heap-allocated array of heap strings   */
+    int    bulk_start;
+    int    bulk_count;
+    int    bulk_total;  /* total line_count at snapshot time      */
+    int    saved_line;  /* cursor state before operation          */
+    int    saved_col;
+} UndoOp;
+
+/* ---------- Dynamic Line Storage ---------- */
+static char **lines = NULL;   /* heap array of heap strings          */
+static int line_cap = 0;      /* allocated slots in lines[]          */
+int line_count = 0;           /* active lines                        */
+
+/* ---------- Global State ---------- */
+int current_line = 0;
+int cursor_x = 0;
+int scroll_y = 0;
+char current_filename[256] = "untitled.txt";
+char status_msg[512] = "";
+int is_modified = 0;
+int mod_count = 0;
+int overwrite_mode = 0;
+clock_t last_char_time = 0;
+int in_paste_stream = 0;
+static int is_pasting = 0;
+static int read_only_mode = 0;
+
+static time_t file_mtime = 0;
+static volatile sig_atomic_t got_fatal_signal = 0;
+
+int match_line = -1;
+int match_col  = -1;
+
+static char *clipboard_line = NULL;
+static int syntax_highlight_enabled = 1;
+static int gutter_visible = 1;
+
+static UndoOp *undo_buf = NULL;
+static int undo_head = 0;
+static int undo_count = 0;
+
+static UndoOp *redo_buf = NULL;
+static int redo_top = -1;
+
+/* Function Declarations */
+void save_undo_state_single(int line_idx);
+void save_undo_state_batch(int start_line, int count);
+void undo(void);
+void redo_op(void);
+void draw_screen(void);
+
+/* ---------- Signal Handler ---------- */
+static void fatal_signal_handler(int sig) {
+    (void)sig;
+    got_fatal_signal = 1;
+}
+
+/* ---------- UTF-8 Helpers ---------- */
 static int utf8_display_width(const char *s) {
     if (!s) return 0;
     int cols = 0;
@@ -49,7 +123,6 @@ static int utf8_display_width(const char *s) {
         } else if ((*p & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) {
             wc = ((*p & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F); bytes = 4;
         } else {
-            /* Invalid/partial byte  count as 1 column */
             cols++; p++; continue;
         }
         int w = wcwidth(wc);
@@ -59,7 +132,6 @@ static int utf8_display_width(const char *s) {
     return cols;
 }
 
-/* utf8_display_width for a prefix of n bytes */
 static int utf8_display_width_n(const char *s, int n) {
     if (!s || n <= 0) return 0;
     char *tmp = malloc(n + 1);
@@ -71,17 +143,7 @@ static int utf8_display_width_n(const char *s, int n) {
     return w;
 }
 
-#define MAX_LINE_LEN 512
-#define CTRL_KEY(k) ((k) & 0x1f)
-#define MAX_UNDO 500
-#define VERSION "1.1.36"
-
-/* ---------- dynamic line storage ---------- */
-static char **lines = NULL;   /* heap array of heap strings          */
-static int line_cap = 0;      /* allocated slots in lines[]          */
-int line_count = 0;           /* active lines                        */
-
-/* Grow lines[] to hold at least need slots. Returns 0 on OOM. */
+/* ---------- Memory & Line Management ---------- */
 static int ensure_capacity(int need) {
     if (need <= line_cap) return 1;
     int new_cap = line_cap ? line_cap * 2 : 256;
@@ -94,19 +156,16 @@ static int ensure_capacity(int need) {
     return 1;
 }
 
-/* Return a heap-allocated copy of s, or empty string on OOM. */
 static char *xstrdup(const char *s) {
     char *p = strdup(s);
     return p ? p : strdup("");
 }
 
-/* Replace lines[i] with a copy of s. */
 static void set_line(int i, const char *s) {
     free(lines[i]);
     lines[i] = xstrdup(s);
 }
 
-/* Insert a blank line at position i, shifting everything down. */
 static int insert_line_at(int i, const char *s) {
     if (!ensure_capacity(line_count + 1)) return 0;
     memmove(&lines[i + 1], &lines[i], (line_count - i) * sizeof(char *));
@@ -116,7 +175,6 @@ static int insert_line_at(int i, const char *s) {
     return 1;
 }
 
-/* Remove line i, shifting everything up. */
 static void remove_line_at(int i) {
     free(lines[i]);
     memmove(&lines[i], &lines[i + 1], (line_count - i - 1) * sizeof(char *));
@@ -124,95 +182,59 @@ static void remove_line_at(int i) {
     line_count--;
 }
 
-/* ---------- global state ---------- */
-int current_line = 0;
-int cursor_x = 0;
-int scroll_y = 0;
-char current_filename[256] = "untitled.txt";
-char status_msg[512] = "";
-int is_modified = 0;
-int mod_count = 0;
-int overwrite_mode = 0;
-clock_t last_char_time = 0;
-int in_paste_stream = 0;
-static int is_pasting = 0;
-static int read_only_mode = 0;
+/* ---------- Interactive Input Helper ---------- */
+static int prompt_input(const char *prompt, char *buf, size_t buf_size, int digits_only) {
+    int idx = 0;
+    buf[0] = '\0';
+    int prompt_len = (int)strlen(prompt);
 
-/* mtime of the file as last loaded/saved; 0 = untitled or unknown */
-static time_t file_mtime = 0;
+    noecho();
+    mvprintw(LINES - 1, 0, "%s", prompt);
+    clrtoeol();
+    refresh();
 
-/* Set by SIGTERM/SIGHUP handler  checked in main loop */
-static volatile sig_atomic_t got_fatal_signal = 0;
+    while (idx < (int)buf_size - 1) {
+        int ch = getch();
+        if (ch == 27) {
+            /* Intercept bracketed paste mode sequences */
+            nodelay(stdscr, TRUE);
+            int next1 = getch();
+            if (next1 == '[') {
+                int next2 = getch();
+                if (next2 == '2') {
+                    int seq_char;
+                    while ((seq_char = getch()) != ERR && seq_char != '~');
+                    nodelay(stdscr, FALSE);
+                    continue;
+                }
+                if (next2 != ERR) ungetch(next2);
+            }
+            if (next1 != ERR) ungetch(next1);
+            nodelay(stdscr, FALSE);
 
-static void fatal_signal_handler(int sig) {
-    (void)sig;
-    got_fatal_signal = 1;
+            status_msg[0] = '\0';
+            return 0; /* ESC pressed */
+        } else if (ch == 10 || ch == 13) {
+            break;
+        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (idx > 0) {
+                idx--;
+                buf[idx] = '\0';
+                mvprintw(LINES - 1, prompt_len + idx, " ");
+                move(LINES - 1, prompt_len + idx);
+                refresh();
+            }
+        } else if (digits_only ? isdigit((unsigned char)ch) : (ch >= 32 && ch <= 126)) {
+            buf[idx++] = (char)ch;
+            buf[idx] = '\0';
+            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch);
+            refresh();
+        }
+    }
+    return (strlen(buf) > 0);
 }
 
-/* Bracket match highlight: -1 means no active match */
-int match_line = -1;
-int match_col  = -1;
-
-/* Line clipboard for Ctrl+K / Ctrl+P */
-static char *clipboard_line = NULL;
-
-/* Syntax highlight toggle */
-static int syntax_highlight_enabled = 1;
-
-/* Gutter + col-81 guide visibility toggle (F4) */
-static int gutter_visible = 1;
-
-/* ---------- undo / redo ----------
- *
- * Operations recorded:
- *   OP_CHAR_INS    one character inserted at (line, col)
- *   OP_CHAR_DEL    one character deleted from (line, col)
- *   OP_LINE_SPLIT  line split at (line, col): lines[line] truncated, new line inserted after
- *   OP_LINE_JOIN   lines[line] and lines[line+1] joined; join_col is where the join happened
- *   OP_BULK        arbitrary multi-line snapshot (replace-all, delete-lines, paste)
- *
- * The ring buffer holds up to MAX_UNDO records.  Undo pops from the undo
- * head; the inverse is pushed onto the redo stack.  Any new edit clears redo.
- */
-typedef enum {
-    OP_CHAR_INS,
-    OP_CHAR_DEL,
-    OP_LINE_SPLIT,
-    OP_LINE_JOIN,
-    OP_BULK,
-} OpType;
-
-typedef struct {
-    OpType type;
-    int    line;        /* line index at time of operation        */
-    int    col;         /* column index (char ops and split/join) */
-    char   ch;          /* character (OP_CHAR_INS / OP_CHAR_DEL) */
-    /* OP_LINE_JOIN: text of the line that was removed (lines[line+1]) */
-    /* OP_BULK: snapshot of all lines from bulk_start..bulk_start+bulk_count-1 */
-    char **bulk_lines;  /* heap-allocated array of heap strings   */
-    int    bulk_start;
-    int    bulk_count;
-    int    bulk_total;  /* total line_count at snapshot time      */
-    /* cursor state before the operation */
-    int    saved_line;
-    int    saved_col;
-} UndoOp;
-
-#define UNDO_CAP MAX_UNDO
-
-static UndoOp *undo_buf = NULL;   /* ring buffer, allocated in main()  */
-static int undo_head = 0;         /* index of oldest entry             */
-static int undo_count = 0;        /* number of valid entries           */
-
-static UndoOp *redo_buf = NULL;   /* linear stack (not ring)           */
-static int redo_top = -1;
-
-void save_undo_state_single(int line_idx);  /* kept for call-site compat */
-void save_undo_state_batch(int start_line, int count);
-void undo(void);
-void redo_op(void);
-
-/* Free heap strings inside an op (bulk only). */
+/* ---------- Undo / Redo System ---------- */
 static void free_op(UndoOp *op) {
     if ((op->type == OP_BULK || op->type == OP_LINE_JOIN) && op->bulk_lines) {
         for (int i = 0; i < op->bulk_count; i++) free(op->bulk_lines[i]);
@@ -221,10 +243,8 @@ static void free_op(UndoOp *op) {
     }
 }
 
-/* Push op onto the undo ring, evicting the oldest entry if full. */
 static void push_undo(UndoOp *op) {
     if (undo_count == UNDO_CAP) {
-        /* Evict oldest */
         free_op(&undo_buf[undo_head]);
         undo_head = (undo_head + 1) % UNDO_CAP;
         undo_count--;
@@ -234,7 +254,6 @@ static void push_undo(UndoOp *op) {
     undo_count++;
 }
 
-/* Record a single-character insertion. */
 static void record_char_ins(int line, int col, char ch) {
     UndoOp op = {0};
     op.type = OP_CHAR_INS;
@@ -243,7 +262,6 @@ static void record_char_ins(int line, int col, char ch) {
     push_undo(&op);
 }
 
-/* Record a single-character deletion. */
 static void record_char_del(int line, int col, char ch) {
     UndoOp op = {0};
     op.type = OP_CHAR_DEL;
@@ -252,7 +270,6 @@ static void record_char_del(int line, int col, char ch) {
     push_undo(&op);
 }
 
-/* Record a line split: lines[line] was truncated at col, new line inserted after. */
 static void record_line_split(int line, int col) {
     UndoOp op = {0};
     op.type = OP_LINE_SPLIT;
@@ -261,8 +278,6 @@ static void record_line_split(int line, int col) {
     push_undo(&op);
 }
 
-/* Record a line join: lines[line] and lines[line+1] were merged.
- * tail is the text that was in lines[line+1] before the join. */
 static void record_line_join(int line, int col, const char *tail) {
     UndoOp op = {0};
     op.type = OP_LINE_JOIN;
@@ -273,7 +288,6 @@ static void record_line_join(int line, int col, const char *tail) {
     push_undo(&op);
 }
 
-/* Record a bulk snapshot of lines[start..start+count-1]. */
 static void record_bulk(int start, int count) {
     if (count <= 0) return;
     UndoOp op = {0};
@@ -289,14 +303,11 @@ static void record_bulk(int start, int count) {
     push_undo(&op);
 }
 
-/* Compatibility wrappers used by replace_text and delete_lines_interactive. */
 void save_undo_state_single(int line_idx) { record_bulk(line_idx, 1); }
 void save_undo_state_batch(int start_line, int count) { record_bulk(start_line, count); }
 
-/* Push a full-file snapshot onto the redo stack so redo_op can restore it exactly. */
 static void push_redo_snapshot(int saved_ln, int saved_cx) {
     if (redo_top >= UNDO_CAP - 1) {
-        /* Drop the oldest redo entry (bottom of stack) to make room */
         free_op(&redo_buf[0]);
         memmove(&redo_buf[0], &redo_buf[1], redo_top * sizeof(UndoOp));
         redo_top--;
@@ -323,8 +334,6 @@ void undo(void) {
     int slot = (undo_head + undo_count - 1) % UNDO_CAP;
     UndoOp *op = &undo_buf[slot];
 
-    /* Snapshot the current state onto the redo stack BEFORE applying undo.
-     * redo_op() will restore this snapshot exactly, reverting the undo. */
     push_redo_snapshot(current_line, cursor_x);
 
     switch (op->type) {
@@ -402,7 +411,6 @@ void redo_op(void) {
     if (redo_top < 0) { snprintf(status_msg, sizeof(status_msg), "Nothing to redo!"); return; }
     UndoOp *op = &redo_buf[redo_top];
 
-    /* Restore the snapshot that was taken just before undo ran. */
     int bs = op->bulk_start, bc = op->bulk_count;
     while (line_count > bs) remove_line_at(line_count - 1);
     if (op->bulk_lines) {
@@ -427,9 +435,8 @@ void redo_op(void) {
     snprintf(status_msg, sizeof(status_msg), "Redo performed.");
 }
 
-/* ---------- file I/O ---------- */
+/* ---------- File I/O ---------- */
 void load_file(const char *filename) {
-    /* Clear undo and redo stacks on file load */
     for (int i = 0; i < undo_count; i++) free_op(&undo_buf[(undo_head + i) % UNDO_CAP]);
     undo_head = 0; undo_count = 0;
     for (int i = 0; i <= redo_top; i++) free_op(&redo_buf[i]);
@@ -453,7 +460,6 @@ void load_file(const char *filename) {
         }
     }
 
-    /* Free existing lines */
     for (int i = 0; i < line_count; i++) { free(lines[i]); lines[i] = NULL; }
     line_count = 0;
 
@@ -465,7 +471,6 @@ void load_file(const char *filename) {
         size_t buf_sz = 0;
         ssize_t n;
         while ((n = getline(&buf, &buf_sz, fp)) != -1) {
-            /* Strip trailing newline */
             while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r'))
                 buf[--n] = '\0';
             if (!ensure_capacity(line_count + 1)) break;
@@ -488,79 +493,36 @@ void load_file(const char *filename) {
         line_count = 1;
         is_modified = 0;
     }
-    /* Record mtime so we can detect external changes */
-    {
-        struct stat st;
-        file_mtime = (stat(current_filename, &st) == 0) ? st.st_mtime : 0;
-    }
+
+    struct stat st;
+    file_mtime = (stat(current_filename, &st) == 0) ? st.st_mtime : 0;
+
     syntax_set_file(current_filename);
     syntax_scan(lines, line_count);
 }
 
-void interactive_open() {
+void interactive_open(void) {
     char filename[256];
-    int idx = 0;
-    filename[0] = '\0';
-    const char *prompt = "Enter filename to open (ESC to cancel): ";
-    int prompt_len = strlen(prompt);
-    noecho();
-    mvprintw(LINES - 1, 0, "%s", prompt);
-    clrtoeol();
-    refresh();
-    while (idx < (int)sizeof(filename) - 1) {
-        int ch = getch();
-        if (ch == 27) { status_msg[0] = '\0'; return; }
-        else if (ch == 10 || ch == 13) break;
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) {
-                idx--; filename[idx] = '\0';
-                mvprintw(LINES - 1, prompt_len + idx, " ");
-                move(LINES - 1, prompt_len + idx); refresh();
-            }
-        } else if (ch >= 32 && ch <= 126) {
-            filename[idx++] = (char)ch; filename[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch); refresh();
-        }
-    }
-    if (strlen(filename) > 0) {
+    if (prompt_input("Enter filename to open (ESC to cancel): ", filename, sizeof(filename), 0)) {
         FILE *fp = fopen(filename, "r");
-        if (fp) { fclose(fp); load_file(filename); }
-        else {
+        if (fp) {
+            fclose(fp);
+            load_file(filename);
+        } else {
             mvprintw(LINES - 1, 0, "File not found! Press any key...");
             clrtoeol(); refresh(); getch();
         }
     }
 }
 
-void save_file() {
+void save_file(void) {
     if (read_only_mode) {
         snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot save.");
         return;
     }
     if (strcmp(current_filename, "untitled.txt") == 0) {
         char filename[256];
-        int fidx = 0;
-        filename[0] = '\0';
-        const char *prompt = "Enter filename to save: ";
-        int prompt_len = (int)strlen(prompt);
-        noecho();
-        mvprintw(LINES - 1, 0, "%s", prompt); clrtoeol(); refresh();
-        while (fidx < (int)sizeof(filename) - 1) {
-            int c = getch();
-            if (c == 27) { status_msg[0] = '\0'; return; }
-            else if (c == 10 || c == 13) break;
-            else if (c == KEY_BACKSPACE || c == 127 || c == 8) {
-                if (fidx > 0) {
-                    fidx--; filename[fidx] = '\0';
-                    mvprintw(LINES - 1, prompt_len + fidx, " ");
-                    move(LINES - 1, prompt_len + fidx); refresh();
-                }
-            } else if (c >= 32 && c <= 126) {
-                filename[fidx++] = (char)c; filename[fidx] = '\0';
-                mvprintw(LINES - 1, prompt_len + fidx - 1, "%c", c); refresh();
-            }
-        }
-        if (fidx == 0) return;
+        if (!prompt_input("Enter filename to save: ", filename, sizeof(filename), 0)) return;
         strncpy(current_filename, filename, sizeof(current_filename) - 1);
         current_filename[sizeof(current_filename) - 1] = '\0';
     }
@@ -578,11 +540,10 @@ void save_file() {
         unlink(swp_filename);
         is_modified = 0;
         tracker_clear();
-        /* Update mtime after save so we don't falsely warn about our own write */
-        {
-            struct stat st;
-            file_mtime = (stat(current_filename, &st) == 0) ? st.st_mtime : 0;
-        }
+
+        struct stat st;
+        file_mtime = (stat(current_filename, &st) == 0) ? st.st_mtime : 0;
+
         snprintf(status_msg, sizeof(status_msg), "Saved successfully to '%s'!", current_filename);
     } else {
         mvprintw(LINES - 1, 0, "Error: Could not save file! Press any key...");
@@ -590,7 +551,7 @@ void save_file() {
     }
 }
 
-void auto_save() {
+void auto_save(void) {
     if (read_only_mode) return;
     char swp_filename[300];
     snprintf(swp_filename, sizeof(swp_filename), ".%s.swp", current_filename);
@@ -602,16 +563,12 @@ void auto_save() {
     }
 }
 
-/* ---------- bracket matching ---------- */
-
-/* Search forward or backward through lines[] for the bracket that closes/opens
- * the one at (start_line, start_col). Writes the result into match_line/match_col.
- * Returns 1 on success, 0 if no match found. */
+/* ---------- Bracket Matching ---------- */
 static int find_matching_bracket(int start_line, int start_col) {
     const char *open  = "([{";
     const char *close = ")]}";
     char ch = lines[start_line][start_col];
-    int dir = 0;   /* +1 = forward, -1 = backward */
+    int dir = 0;
     char target = 0;
 
     for (int i = 0; i < 3; i++) {
@@ -641,7 +598,6 @@ static int find_matching_bracket(int start_line, int start_col) {
     return 0;
 }
 
-/* Called each frame: update match_line/match_col based on cursor position. */
 static void update_bracket_match(void) {
     match_line = -1; match_col = -1;
     if (current_line < 0 || current_line >= line_count) return;
@@ -653,8 +609,8 @@ static void update_bracket_match(void) {
         find_matching_bracket(current_line, cursor_x);
 }
 
-/* ---------- screen rendering ---------- */
-void draw_screen() {
+/* ---------- Screen Rendering ---------- */
+void draw_screen(void) {
     start_color();
     init_pair(1, COLOR_YELLOW, COLOR_BLACK);
     init_pair(2, COLOR_RED, COLOR_BLACK);
@@ -662,7 +618,7 @@ void draw_screen() {
     init_pair(4, COLOR_MAGENTA, COLOR_BLACK);
     init_pair(5, COLOR_GREEN, COLOR_BLACK);
     init_pair(6, COLOR_YELLOW, COLOR_BLACK);
-    init_pair(7, COLOR_BLACK, COLOR_YELLOW);  /* bracket highlight: black on yellow */
+    init_pair(7, COLOR_BLACK, COLOR_YELLOW);
 
     update_bracket_match();
 
@@ -681,14 +637,11 @@ void draw_screen() {
 
     int max_displayable_lines = LINES - 4;
     int physical_row = 2;
-    /* wrap one column before the terminal edge to prevent ncurses auto-scroll */
     int wrap_col = COLS - 1;
     int file_line_index = scroll_y;
 
-    /* Gutter width scales with the number of digits in line_count */
     int gutter_digits = 1;
     { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gutter_digits++; } }
-    /* gutter layout: <digits> + 1 space + 1 marker + 1 space = digits+3 cols; text starts at digits+3 */
     int gutter_width = gutter_visible ? (gutter_digits + 3) : 0;
 
     while (physical_row < 2 + max_displayable_lines && file_line_index < line_count) {
@@ -710,21 +663,16 @@ void draw_screen() {
 
         char *line = lines[file_line_index];
         int len = strlen(line);
-        int disp_len = utf8_display_width(line);  /* display columns, not bytes */
+        int disp_len = utf8_display_width(line);
         int current_phys_row = physical_row;
         int current_phys_col = gutter_width;
 
         move(current_phys_row, current_phys_col);
 
-        /* Get syntax spans for this line */
         Span spans[MAX_SPANS];
         int nspans = syntax_highlight_enabled ? syntax_spans(file_line_index, line, spans) : 0;
-
-        /* Colour-pair lookup: TOK -> ncurses pair */
         static const int tok_pair[] = { 0, 2, 4, 5, 3 };
 
-        /* Render character by character, applying span colours */
-        /* Show '>' at right edge of first visual row if line extends beyond terminal */
         if (disp_len > wrap_col - gutter_width) {
             attron(A_DIM);
             mvaddch(physical_row, wrap_col - 1, '>');
@@ -733,7 +681,7 @@ void draw_screen() {
         }
 
         int span_idx = 0;
-        int j = 0;  /* byte index */
+        int j = 0;
         while (j < len) {
             if (current_phys_col >= wrap_col) {
                 current_phys_row++; current_phys_col = gutter_width;
@@ -742,21 +690,19 @@ void draw_screen() {
                     clrtoeol();
                 } else break;
             }
-            /* Determine byte length of this UTF-8 codepoint */
             unsigned char ub = (unsigned char)line[j];
             int clen = 1;
             if      ((ub & 0xF8) == 0xF0) clen = 4;
             else if ((ub & 0xF0) == 0xE0) clen = 3;
             else if ((ub & 0xE0) == 0xC0) clen = 2;
-            /* Clamp to remaining bytes */
             if (j + clen > len) clen = len - j;
-            /* Display width of this codepoint */
+
             int cw = utf8_display_width_n(line + j, clen);
             if (cw < 1) cw = 1;
-            /* Bracket highlight takes priority */
-            int is_bracket_cursor = (file_line_index == current_line && j == cursor_x &&
-                                     match_line >= 0);
+
+            int is_bracket_cursor = (file_line_index == current_line && j == cursor_x && match_line >= 0);
             int is_bracket_match  = (file_line_index == match_line && j == match_col);
+
             if (is_bracket_cursor || is_bracket_match) {
                 attron(COLOR_PAIR(7) | A_BOLD);
                 for (int b = 0; b < clen; b++) printw("%c", line[j + b]);
@@ -765,16 +711,17 @@ void draw_screen() {
                 j += clen;
                 continue;
             }
-            /* Advance past expired spans */
-            while (span_idx < nspans && spans[span_idx].end <= j)
-                span_idx++;
-            /* Apply colour if inside an active span */
+
+            while (span_idx < nspans && spans[span_idx].end <= j) span_idx++;
+
             int pair = 0;
             if (span_idx < nspans && j >= spans[span_idx].start && j < spans[span_idx].end)
                 pair = tok_pair[spans[span_idx].type];
+
             if (pair) attron(COLOR_PAIR(pair));
             for (int b = 0; b < clen; b++) printw("%c", line[j + b]);
             if (pair) attroff(COLOR_PAIR(pair));
+
             current_phys_col += cw;
             j += clen;
         }
@@ -782,13 +729,11 @@ void draw_screen() {
         file_line_index++;
     }
 
-    /* clear any remaining rows below the last rendered line */
     while (physical_row < 2 + max_displayable_lines) {
         move(physical_row, 0); clrtoeol();
         physical_row++;
     }
 
-    /* Column-81 margin guide (only when gutter is visible) */
     if (gutter_visible && COLS > 81) {
         for (int r = 2; r < LINES - 2; r++) {
             chtype ch_at = mvinch(r, 81);
@@ -800,10 +745,10 @@ void draw_screen() {
         }
     }
 
-    /* Status bar */
     move(LINES - 2, 0); clrtoeol();
     for (int x = 0; x < COLS; x++) mvaddch(LINES - 2, x, ACS_HLINE);
     move(LINES - 1, 0); clrtoeol();
+
     if (strlen(status_msg) > 0) {
         attron(COLOR_PAIR(1));
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
@@ -828,7 +773,6 @@ void draw_screen() {
         }
     }
 
-    /* Cursor placement  gutter_width matches the dynamic gutter computed above */
     int gd2 = 1; { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd2++; } }
     int gw2 = gutter_visible ? (gd2 + 3) : 0;
     int text_width2 = COLS - 1 - gw2;
@@ -847,61 +791,14 @@ void draw_screen() {
     refresh();
 }
 
-/* ---------- find / replace ---------- */
-void find_text() {
+/* ---------- Text Search & Replace ---------- */
+void find_text(void) {
     char search_str[128];
-    int idx = 0;
-    search_str[0] = '\0';
-    const char *prompt = "Find: ";
-    int prompt_len = strlen(prompt);
-
-    noecho();
-    mvprintw(LINES - 1, 0, "%s", prompt);
-    clrtoeol();
-    refresh();
-
-    while (idx < (int)sizeof(search_str) - 1) {
-        int ch = getch();
-        if (ch == 27) {
-            /* Intercept bracketed paste mode sequences (\033[200~ / \033[201~) */
-            nodelay(stdscr, TRUE);
-            int next1 = getch();
-            if (next1 == '[') {
-                int next2 = getch();
-                if (next2 == '2') {
-                    /* Consume paste boundary tag up to '~' */
-                    int seq_char;
-                    while ((seq_char = getch()) != ERR && seq_char != '~');
-                    nodelay(stdscr, FALSE);
-                    continue;
-                }
-                if (next2 != ERR) ungetch(next2);
-            }
-            if (next1 != ERR) ungetch(next1);
-            nodelay(stdscr, FALSE);
-
-            /* Actual ESC key press: abort search */
-            status_msg[0] = '\0';
-            return;
-        }
-        else if (ch == 10 || ch == 13) break;
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) {
-                idx--; search_str[idx] = '\0';
-                mvprintw(LINES - 1, prompt_len + idx, " ");
-                move(LINES - 1, prompt_len + idx); refresh();
-            }
-        } else if (ch >= 32 && ch <= 126) {
-            search_str[idx++] = (char)ch; search_str[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch); refresh();
-        }
-    }
-    if (strlen(search_str) == 0) return;
+    if (!prompt_input("Find: ", search_str, sizeof(search_str), 0)) return;
 
     struct { int line; int col; } matches[500];
     int match_count = 0, current_match_idx = 0;
 
-    /* Build match list across the entire file */
     for (int i = 0; i < line_count; i++) {
         char lower_line[MAX_LINE_LEN], lower_search[128];
         int ll = strlen(lines[i]);
@@ -929,7 +826,6 @@ void find_text() {
         return;
     }
 
-    /* Start navigation from the first match at or after the current cursor position */
     int start_idx = 0;
     for (int k = 0; k < match_count; k++) {
         if (matches[k].line > current_line ||
@@ -940,7 +836,6 @@ void find_text() {
     }
     current_match_idx = start_idx;
 
-    /* Interactive match navigation loop */
     while (1) {
         current_line = matches[current_match_idx].line;
         cursor_x = matches[current_match_idx].col;
@@ -971,119 +866,20 @@ void find_text() {
     }
 }
 
-/* ---------- replace_text ---------- */
-void replace_text() {
+void replace_text(void) {
     if (read_only_mode) {
         snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
         return;
     }
     char search_str[128], replace_str[128];
-    int idx = 0;
-    search_str[0] = '\0';
-    replace_str[0] = '\0';
+    if (!prompt_input("Find: ", search_str, sizeof(search_str), 0)) return;
+    if (!prompt_input("Replace with: ", replace_str, sizeof(replace_str), 0)) return;
 
-    /* --- Step 1: Get Find String --- */
-    const char *prompt1 = "Find: ";
-    int prompt_len1 = strlen(prompt1);
-
-    noecho();
-    mvprintw(LINES - 1, 0, "%s", prompt1);
-    clrtoeol();
-    refresh();
-
-    while (idx < (int)sizeof(search_str) - 1) {
-        int ch = getch();
-        if (ch == 27) {
-            /* Intercept bracketed paste mode sequences (\033[200~ and \033[201~) */
-            nodelay(stdscr, TRUE);
-            int next1 = getch();
-            if (next1 == '[') {
-                int next2 = getch();
-                if (next2 == '2') {
-                    int seq_char;
-                    while ((seq_char = getch()) != ERR && seq_char != '~');
-                    nodelay(stdscr, FALSE);
-                    continue;
-                }
-                if (next2 != ERR) ungetch(next2);
-            }
-            if (next1 != ERR) ungetch(next1);
-            nodelay(stdscr, FALSE);
-
-            status_msg[0] = '\0';
-            return;
-        }
-        else if (ch == 10 || ch == 13) break;
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) {
-                idx--; search_str[idx] = '\0';
-                mvprintw(LINES - 1, prompt_len1 + idx, " ");
-                move(LINES - 1, prompt_len1 + idx); refresh();
-            }
-        } else if (ch >= 32 && ch <= 126) {
-            search_str[idx++] = (char)ch; search_str[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len1 + idx - 1, "%c", ch); refresh();
-        }
-    }
-
-    if (strlen(search_str) == 0) {
-        snprintf(status_msg, sizeof(status_msg), "Search cancelled (empty query).");
-        return;
-    }
-
-    /* --- Step 2: Get Replace String --- */
-    idx = 0;
-    const char *prompt2 = "Replace with: ";
-    int prompt_len2 = strlen(prompt2);
-
-    mvprintw(LINES - 1, 0, "%s", prompt2);
-    clrtoeol();
-    refresh();
-
-    while (idx < (int)sizeof(replace_str) - 1) {
-        int ch = getch();
-        if (ch == 27) {
-            /* Intercept bracketed paste mode sequences */
-            nodelay(stdscr, TRUE);
-            int next1 = getch();
-            if (next1 == '[') {
-                int next2 = getch();
-                if (next2 == '2') {
-                    int seq_char;
-                    while ((seq_char = getch()) != ERR && seq_char != '~');
-                    nodelay(stdscr, FALSE);
-                    continue;
-                }
-                if (next2 != ERR) ungetch(next2);
-            }
-            if (next1 != ERR) ungetch(next1);
-            nodelay(stdscr, FALSE);
-
-            status_msg[0] = '\0';
-            return;
-        }
-        else if (ch == 10 || ch == 13) break;
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) {
-                idx--; replace_str[idx] = '\0';
-                mvprintw(LINES - 1, prompt_len2 + idx, " ");
-                move(LINES - 1, prompt_len2 + idx); refresh();
-            }
-        } else if (ch >= 32 && ch <= 126) {
-            replace_str[idx++] = (char)ch; replace_str[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len2 + idx - 1, "%c", ch); refresh();
-        }
-    }
-
-    /* --- Step 3: Interactive Confirmation & Replacement --- */
     int replacements = 0;
     int search_len = strlen(search_str);
     int replace_len = strlen(replace_str);
     int replace_all = 0;
 
-    if (search_len == 0) return;
-
-    /* Batch undo snapshot of the entire document before beginning replacements */
     save_undo_state_batch(0, line_count);
 
     for (int i = 0; i < line_count; i++) {
@@ -1106,10 +902,7 @@ void replace_text() {
             lower_search[j] = tolower((unsigned char)search_str[j]);
         lower_search[search_len < 127 ? search_len : 127] = '\0';
 
-        /* Quick check if target exists in line */
-        if (strstr(lower_line, lower_search) == NULL) {
-            continue;
-        }
+        if (strstr(lower_line, lower_search) == NULL) continue;
 
         char buffer[MAX_LINE_LEN];
         int b_idx = 0;
@@ -1124,7 +917,6 @@ void replace_text() {
                 if (replace_all) {
                     do_replace = 1;
                 } else {
-                    /* Jump cursor and view to current match location */
                     current_line = i;
                     cursor_x = orig_idx;
                     int max_displayable_lines = LINES - 4;
@@ -1147,18 +939,15 @@ void replace_text() {
                         do_replace = 1;
                         replace_all = 1;
                     } else if (confirm == 'q' || confirm == 'Q' || confirm == 27) {
-                        /* Cancel out of replacement process */
                         snprintf(status_msg, sizeof(status_msg),
                                  "Replacement cancelled. Replaced %d occurrence(s).", replacements);
                         return;
                     } else {
-                        /* 'n' or any other key skips this match */
                         do_replace = 0;
                     }
                 }
 
                 if (do_replace) {
-                    /* Copy replacement string */
                     for (int r = 0; r < replace_len && b_idx < MAX_LINE_LEN - 1; r++) {
                         buffer[b_idx++] = replace_str[r];
                     }
@@ -1166,14 +955,12 @@ void replace_text() {
                     replacements++;
                     line_changed = 1;
                 } else {
-                    /* Keep original char */
                     if (b_idx < MAX_LINE_LEN - 1) {
                         buffer[b_idx++] = current_buf[orig_idx];
                     }
                     orig_idx++;
                 }
             } else {
-                /* Copy original char */
                 if (b_idx < MAX_LINE_LEN - 1) {
                     buffer[b_idx++] = current_buf[orig_idx];
                 }
@@ -1182,7 +969,6 @@ void replace_text() {
         }
         buffer[b_idx] = '\0';
 
-        /* Update line if changes occurred */
         if (line_changed && strcmp(lines[i], buffer) != 0) {
             free(lines[i]);
             lines[i] = strdup(buffer);
@@ -1193,24 +979,15 @@ void replace_text() {
     snprintf(status_msg, sizeof(status_msg), "Replaced %d occurrence(s).", replacements);
 }
 
-/* ---------- goto line ---------- */
-void goto_line() {
-    char line_input[32]; int idx = 0; line_input[0] = '\0';
-    const char *prompt = "Go to line: "; int prompt_len = strlen(prompt);
-    echo(); mvprintw(LINES-1,0,"%s",prompt); clrtoeol(); refresh();
-    while (idx < (int)sizeof(line_input) - 1) {
-        int ch = getch();
-        if (ch == 27) { noecho(); status_msg[0]='\0'; return; }
-        else if (ch == 10 || ch == 13) break;
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) { idx--; line_input[idx]='\0'; mvprintw(LINES-1,prompt_len+idx," "); move(LINES-1,prompt_len+idx); refresh(); }
-        } else if (isdigit((unsigned char)ch)) { line_input[idx++]=(char)ch; line_input[idx]='\0'; }
-    }
-    noecho();
-    if (strlen(line_input) == 0) return;
+/* ---------- Line Jump and Processing ---------- */
+void goto_line(void) {
+    char line_input[32];
+    if (!prompt_input("Go to line: ", line_input, sizeof(line_input), 1)) return;
+
     int target = atoi(line_input);
     if (target < 1 || target > line_count) {
-        snprintf(status_msg, sizeof(status_msg), "Line %d out of bounds! (Total lines: %d)", target, line_count); return;
+        snprintf(status_msg, sizeof(status_msg), "Line %d out of bounds! (Total lines: %d)", target, line_count);
+        return;
     }
     current_line = target - 1; cursor_x = 0;
     int max_displayable_lines = LINES - 4;
@@ -1220,47 +997,17 @@ void goto_line() {
     if (scroll_y < 0) scroll_y = 0;
 }
 
-/* Helper to prompt for line numbers/ranges and perform either cut or delete */
 static void process_line_ranges_interactive(int is_cut_mode) {
     if (read_only_mode) {
         snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
         return;
     }
     char input[256];
-    int idx = 0;
-    input[0] = '\0';
-
     const char *prompt = is_cut_mode
         ? "Cut lines (e.g., 3, 5, 10-25 or !20-25): "
         : "Delete lines (e.g., 3, 5, 10-25 or !20-25): ";
-    int prompt_len = (int)strlen(prompt);
 
-    noecho();
-    mvprintw(LINES - 1, 0, "%s", prompt);
-    clrtoeol();
-    refresh();
-
-    while (idx < (int)sizeof(input) - 1) {
-        int ch = getch();
-        if (ch == 27) { status_msg[0] = '\0'; return; }
-        else if (ch == 10 || ch == 13) break;
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) {
-                idx--;
-                input[idx] = '\0';
-                mvprintw(LINES - 1, prompt_len + idx, " ");
-                move(LINES - 1, prompt_len + idx);
-                refresh();
-            }
-        } else if (ch >= 32 && ch <= 126) {
-            input[idx++] = (char)ch;
-            input[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch);
-            refresh();
-        }
-    }
-
-    if (strlen(input) == 0) return;
+    if (!prompt_input(prompt, input, sizeof(input), 0)) return;
 
     char saved_input_copy[256];
     strncpy(saved_input_copy, input, sizeof(saved_input_copy) - 1);
@@ -1271,7 +1018,6 @@ static void process_line_ranges_interactive(int is_cut_mode) {
 
     save_undo_state_batch(0, line_count);
 
-    /* Check for leading '!' inversion operator */
     char *p = input;
     while (*p == ' ' || *p == '\t') p++;
 
@@ -1300,7 +1046,6 @@ static void process_line_ranges_interactive(int is_cut_mode) {
         }
     }
 
-    /* If cut mode is enabled, build a multi-line string for clipboard_line */
     if (is_cut_mode) {
         free(clipboard_line);
         clipboard_line = NULL;
@@ -1308,7 +1053,7 @@ static void process_line_ranges_interactive(int is_cut_mode) {
         size_t total_bytes = 0;
         for (int i = 0; i < line_count; i++) {
             if (to_process[i]) {
-                total_bytes += strlen(lines[i]) + 1; /* +1 for newline */
+                total_bytes += strlen(lines[i]) + 1;
             }
         }
 
@@ -1331,7 +1076,6 @@ static void process_line_ranges_interactive(int is_cut_mode) {
         }
     }
 
-    /* Remove lines in reverse order to keep indices aligned */
     int processed_count = 0;
     for (int i = line_count - 1; i >= 0; i--) {
         if (to_process[i]) {
@@ -1362,19 +1106,11 @@ static void process_line_ranges_interactive(int is_cut_mode) {
     }
 }
 
-/* ---------- delete / cut lines ---------- */
-void delete_lines_interactive() {
-    process_line_ranges_interactive(0);
-}
+void delete_lines_interactive(void) { process_line_ranges_interactive(0); }
+void cut_lines_interactive(void) { process_line_ranges_interactive(1); }
 
-void cut_lines_interactive() {
-    process_line_ranges_interactive(1);
-}
-
-/* ---------- help window ---------- */
-void show_help_window() {
-    /* Categorised, scrollable help entries.
-     * NULL entries are section headers; empty string "" is a blank spacer. */
+/* ---------- Help Dialog ---------- */
+void show_help_window(void) {
     struct HelpEntry { const char *key; const char *desc; int is_header; };
     static const struct HelpEntry entries[] = {
         { "FILE",          NULL,                         1 },
@@ -1418,7 +1154,7 @@ void show_help_window() {
 
     int win_h = 22, win_w = 46;
     if (win_h > LINES - 2) win_h = LINES - 2;
-    int inner_h = win_h - 6; /* rows available for scrolling content (2 borders + 4 footer rows) */
+    int inner_h = win_h - 6;
     int start_y = (LINES - win_h) / 2;
     int start_x = (COLS  - win_w) / 2;
     WINDOW *hw = newwin(win_h, win_w, start_y, start_x);
@@ -1429,7 +1165,6 @@ void show_help_window() {
         werase(hw);
         box(hw, 0, 0);
 
-        /* Title:  qi vX.X.X  on top border row */
         {
             char title[32];
             snprintf(title, sizeof(title), " qi v%s ", VERSION);
@@ -1442,7 +1177,6 @@ void show_help_window() {
             wattroff(hw, COLOR_PAIR(1) | A_BOLD);
         }
 
-        /* Render visible entries */
         int row = 1;
         int rendered = 0;
         for (int i = 0; i < total && row < 1 + inner_h; i++) {
@@ -1452,7 +1186,6 @@ void show_help_window() {
                 mvwprintw(hw, row, 2, "%s", entries[i].key);
                 wattroff(hw, A_BOLD | A_UNDERLINE);
             } else if (entries[i].key[0] == '\0') {
-                /* blank spacer */
             } else {
                 mvwprintw(hw, row, 2,  "%-14s", entries[i].key);
                 mvwprintw(hw, row, 16, "%s", entries[i].desc);
@@ -1461,13 +1194,9 @@ void show_help_window() {
             rendered++;
         }
 
-        /* Scroll indicator */
-        if (scroll > 0)
-            mvwprintw(hw, 1, win_w - 4, " ^ ");
-        if (scroll + inner_h < total)
-            mvwprintw(hw, inner_h, win_w - 4, " v ");
+        if (scroll > 0) mvwprintw(hw, 1, win_w - 4, " ^ ");
+        if (scroll + inner_h < total) mvwprintw(hw, inner_h, win_w - 4, " v ");
 
-        /* Footer: separator, scroll hint, close hint  all above the bottom bump row */
         for (int x = 1; x < win_w - 1; x++) mvwaddch(hw, win_h - 5, x, ACS_HLINE);
         wattron(hw, A_DIM);
         mvwprintw(hw, win_h - 4, 2, "Arrow keys to scroll");
@@ -1475,7 +1204,7 @@ void show_help_window() {
         wattron(hw, COLOR_PAIR(1));
         mvwprintw(hw, win_h - 3, 2, "Press any key to close...");
         wattroff(hw, COLOR_PAIR(1));
-        /* Copyright:  (c) 2026 ...  on bottom border row */
+
         {
             char copy[48];
             snprintf(copy, sizeof(copy), " (c) 2026 Christopher Camacho ");
@@ -1502,18 +1231,185 @@ void show_help_window() {
     refresh();
 }
 
-/* ---------- main ---------- */
-int main(int argc, char *argv[]) {
-    setlocale(LC_ALL, "");  /* enable UTF-8 locale for wcwidth() */
+/* ---------- Editor Actions & Helpers ---------- */
+static void handle_mouse_event(void) {
+    MEVENT me;
+    if (getmouse(&me) == OK) {
+        int scroll_speed = 3;
+        if (me.bstate & BUTTON4_PRESSED) {
+            scroll_y -= scroll_speed;
+            if (scroll_y < 0) scroll_y = 0;
+            if (current_line < scroll_y) current_line = scroll_y;
+        } else if (me.bstate & BUTTON5_PRESSED) {
+            int mdl = LINES - 4;
+            scroll_y += scroll_speed;
+            if (scroll_y > line_count - 1) scroll_y = line_count - 1;
+            if (scroll_y < 0) scroll_y = 0;
+            if (current_line < scroll_y) current_line = scroll_y;
+            else if (current_line >= scroll_y + mdl) current_line = scroll_y + mdl - 1;
+        } else if (me.bstate & BUTTON1_PRESSED) {
+            int click_row = (int)me.y;
+            int click_col = (int)me.x;
+            if (click_row >= 2 && click_row < LINES - 2) {
+                int gd_m = 1; { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd_m++; } }
+                int gw_m = gutter_visible ? (gd_m + 3) : 0;
+                int text_width = COLS - 1 - gw_m;
+                int phys = 2;
+                int found = 0;
+                for (int i = scroll_y; i < line_count && phys < LINES - 2; i++) {
+                    int ll = utf8_display_width(lines[i]);
+                    int vrows = (ll == 0) ? 1 : (ll / text_width) + 1;
+                    if (click_row < phys + vrows) {
+                        int row_within = click_row - phys;
+                        int col_within = click_col - gw_m;
+                        if (col_within < 0) col_within = 0;
+                        int new_cx = row_within * text_width + col_within;
+                        if (new_cx > ll) new_cx = ll;
+                        current_line = i;
+                        cursor_x = new_cx;
+                        found = 1;
+                        break;
+                    }
+                    phys += vrows;
+                }
+                if (!found && line_count > 0) {
+                    current_line = line_count - 1;
+                    cursor_x = (int)strlen(lines[current_line]);
+                }
+            }
+        }
+    }
+}
 
-    /* Check executable name for view / roqi */
+static void handle_backspace(void) {
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
+    } else if (cursor_x > 0) {
+        record_char_del(current_line, cursor_x - 1, lines[current_line][cursor_x - 1]);
+        int len = strlen(lines[current_line]);
+        memmove(lines[current_line] + cursor_x - 1,
+                lines[current_line] + cursor_x,
+                len - cursor_x + 1);
+        cursor_x--; is_modified = 1;
+    } else if (current_line > 0) {
+        int target = current_line - 1;
+        int target_len = strlen(lines[target]);
+        int cur_len = strlen(lines[current_line]);
+        char *merged = malloc(target_len + cur_len + 1);
+        if (merged) {
+            record_line_join(target, target_len, lines[current_line]);
+            memcpy(merged, lines[target], target_len);
+            memcpy(merged + target_len, lines[current_line], cur_len + 1);
+            free(lines[target]); lines[target] = merged;
+            remove_line_at(current_line);
+            current_line--; cursor_x = target_len;
+            is_modified = 1;
+            if (current_line < scroll_y) scroll_y = current_line;
+        }
+    }
+}
+
+static void handle_delete_key(void) {
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
+    } else {
+        int len = strlen(lines[current_line]);
+        if (cursor_x < len) {
+            record_char_del(current_line, cursor_x, lines[current_line][cursor_x]);
+            memmove(lines[current_line] + cursor_x,
+                    lines[current_line] + cursor_x + 1,
+                    len - cursor_x);
+            is_modified = 1;
+        } else if (current_line < line_count - 1) {
+            int next = current_line + 1;
+            int next_len = strlen(lines[next]);
+            char *merged = malloc(len + next_len + 1);
+            if (merged) {
+                record_line_join(current_line, len, lines[next]);
+                memcpy(merged, lines[current_line], len);
+                memcpy(merged + len, lines[next], next_len + 1);
+                free(lines[current_line]); lines[current_line] = merged;
+                remove_line_at(next);
+                is_modified = 1;
+            }
+        }
+    }
+}
+
+static void handle_enter_key(int paste_batch_active) {
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
+        return;
+    }
+    if (!paste_batch_active) record_line_split(current_line, cursor_x);
+
+    int indent_len = 0;
+    if (!is_pasting) {
+        while (lines[current_line][indent_len] == ' ' ||
+               lines[current_line][indent_len] == '\t')
+            indent_len++;
+        if (cursor_x < indent_len) indent_len = 0;
+    }
+
+    char *tail_text = lines[current_line] + cursor_x;
+    int tail_len = (int)strlen(tail_text);
+    char *new_line = malloc(indent_len + tail_len + 1);
+    if (new_line) {
+        memcpy(new_line, lines[current_line], indent_len);
+        memcpy(new_line + indent_len, tail_text, tail_len + 1);
+    } else {
+        new_line = xstrdup(tail_text);
+        indent_len = 0;
+    }
+    lines[current_line][cursor_x] = '\0';
+    insert_line_at(current_line + 1, new_line);
+    free(new_line);
+    current_line++; cursor_x = indent_len;
+    is_modified = 1;
+
+    int max_displayable_lines = LINES - 4;
+    if (current_line >= scroll_y + max_displayable_lines) {
+        scroll_y = current_line - max_displayable_lines + 1;
+        if (scroll_y < 0) scroll_y = 0;
+    }
+}
+
+static void handle_printable_char(int ch, int paste_batch_active) {
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
+        return;
+    }
+    int len = strlen(lines[current_line]);
+    if (!paste_batch_active) {
+        record_char_ins(current_line, cursor_x, (char)ch);
+    }
+    if (overwrite_mode && cursor_x < len) {
+        lines[current_line][cursor_x] = (char)ch;
+    } else {
+        char *new_line = malloc(len + 2);
+        if (new_line) {
+            memcpy(new_line, lines[current_line], cursor_x);
+            new_line[cursor_x] = (char)ch;
+            memcpy(new_line + cursor_x + 1, lines[current_line] + cursor_x, len - cursor_x + 1);
+            free(lines[current_line]); lines[current_line] = new_line;
+        }
+    }
+    tracker_set_modified(current_line, cursor_x, 1);
+    cursor_x++; is_modified = 1;
+    mod_count++;
+    if (mod_count >= 50) { auto_save(); mod_count = 0; }
+}
+
+/* ---------- Main Loop ---------- */
+int main(int argc, char *argv[]) {
+    setlocale(LC_ALL, "");
+
     char *prog_name = strrchr(argv[0], '/');
     prog_name = prog_name ? prog_name + 1 : argv[0];
     if (strcmp(prog_name, "view") == 0 || strcmp(prog_name, "roqi") == 0) {
         read_only_mode = 1;
     }
 
-    /* Parse flags and positional arguments */
     char *target_filename = NULL;
     char *target_line_arg = NULL;
 
@@ -1540,29 +1436,22 @@ int main(int argc, char *argv[]) {
     noecho();
     keypad(stdscr, TRUE);
 
-    /* enable terminal bracketed paste mode */
     printf("\033[?2004h");
     fflush(stdout);
 
     start_color();
     init_pair(1, COLOR_YELLOW, COLOR_BLACK);
     curs_set(1);
-#ifndef BUTTON5_PRESSED
-#define BUTTON5_PRESSED BUTTON2_PRESSED
-#endif
     mousemask(BUTTON1_PRESSED | BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
 
-    /* Install signal handlers for graceful shutdown */
     signal(SIGTERM, fatal_signal_handler);
     signal(SIGHUP,  fatal_signal_handler);
 
-    /* Initialise tracker with a modest hint; it only uses 1 byte per line */
     tracker_init(1024, 1);
 
     undo_buf = calloc(UNDO_CAP, sizeof(UndoOp));
     redo_buf = calloc(UNDO_CAP, sizeof(UndoOp));
 
-    /* Bootstrap with one empty line */
     ensure_capacity(1);
     lines[0] = xstrdup("");
     line_count = 1;
@@ -1591,17 +1480,15 @@ int main(int argc, char *argv[]) {
         draw_screen();
         int ch = getch();
 
-        if (ch == 27) { /* ESC key */
+        if (ch == 27) {
             nodelay(stdscr, TRUE);
             int next1 = getch();
 
-            /* Option/Alt+B: Jump to matching bracket */
             if (next1 == 'b' || next1 == 'B') {
                 nodelay(stdscr, FALSE);
                 if (find_matching_bracket(current_line, cursor_x)) {
                     current_line = match_line;
                     cursor_x    = match_col;
-                    /* Scroll so the destination is visible */
                     int mdl = LINES - 4;
                     if (current_line < scroll_y)
                         scroll_y = current_line;
@@ -1652,17 +1539,15 @@ int main(int argc, char *argv[]) {
 
         status_msg[0] = '\0';
 
-        /* Handle SIGTERM / SIGHUP: save if modified, then exit */
         if (got_fatal_signal) {
             if (is_modified && !read_only_mode) save_file();
             break;
         }
 
-        /* External file modification check (every draw cycle, lightweight) */
         if (file_mtime != 0 && strcmp(current_filename, "untitled.txt") != 0) {
             struct stat st;
             if (stat(current_filename, &st) == 0 && st.st_mtime != file_mtime) {
-                file_mtime = st.st_mtime;  /* update so we only warn once */
+                file_mtime = st.st_mtime;
                 move(LINES - 1, 0); clrtoeol();
                 attron(COLOR_PAIR(2));
                 printw("File changed on disk! Reload? (y/n): ");
@@ -1695,11 +1580,8 @@ int main(int argc, char *argv[]) {
             if (read_only_mode) {
                 snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
             } else if (cursor_x > 0) {
-                /* Delete word to the left of the cursor */
                 int orig = cursor_x;
-                /* skip trailing spaces */
                 while (cursor_x > 0 && isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
-                /* skip word chars */
                 while (cursor_x > 0 && !isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
                 record_bulk(current_line, 1);
                 int line_len = (int)strlen(lines[current_line]);
@@ -1711,24 +1593,20 @@ int main(int argc, char *argv[]) {
         }
         else if (ch == KEY_F(3)) {
             read_only_mode = !read_only_mode;
-            snprintf(status_msg, sizeof(status_msg), "Read-Only mode %s",
-                     read_only_mode ? "ON" : "OFF");
+            snprintf(status_msg, sizeof(status_msg), "Read-Only mode %s", read_only_mode ? "ON" : "OFF");
         }
         else if (ch == KEY_F(4)) {
             gutter_visible = !gutter_visible;
-            snprintf(status_msg, sizeof(status_msg), "Gutter %s.",
-                     gutter_visible ? "on" : "off");
+            snprintf(status_msg, sizeof(status_msg), "Gutter %s.", gutter_visible ? "on" : "off");
         }
         else if (ch == KEY_F(5)) {
             syntax_highlight_enabled = !syntax_highlight_enabled;
-            snprintf(status_msg, sizeof(status_msg), "Syntax highlighting %s.",
-                     syntax_highlight_enabled ? "on" : "off");
+            snprintf(status_msg, sizeof(status_msg), "Syntax highlighting %s.", syntax_highlight_enabled ? "on" : "off");
         }
         else if (ch == CTRL_KEY('n')) {
             if (read_only_mode) {
                 snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
             } else {
-                /* Duplicate current line */
                 record_bulk(current_line, 1);
                 insert_line_at(current_line + 1, lines[current_line]);
                 current_line++;
@@ -1795,78 +1673,30 @@ int main(int argc, char *argv[]) {
             }
         }
         else if (ch == KEY_MOUSE) {
-            MEVENT me;
-            if (getmouse(&me) == OK) {
-                int scroll_speed = 3;
-                if (me.bstate & BUTTON4_PRESSED) {
-                    scroll_y -= scroll_speed;
-                    if (scroll_y < 0) scroll_y = 0;
-                    if (current_line < scroll_y) current_line = scroll_y;
-                } else if (me.bstate & BUTTON5_PRESSED) {
-                    int mdl = LINES - 4;
-                    scroll_y += scroll_speed;
-                    if (scroll_y > line_count - 1) scroll_y = line_count - 1;
-                    if (scroll_y < 0) scroll_y = 0;
-                    if (current_line < scroll_y) current_line = scroll_y;
-                    else if (current_line >= scroll_y + mdl) current_line = scroll_y + mdl - 1;
-                } else if (me.bstate & BUTTON1_PRESSED) {
-                int click_row = (int)me.y;
-                int click_col = (int)me.x;
-                /* rows 0 and 1 are header; rows LINES-2 and LINES-1 are status */
-                if (click_row >= 2 && click_row < LINES - 2) {
-                    int gd_m=1; { int tmp=line_count; while(tmp>=10){tmp/=10;gd_m++;} }
-                    int gw_m = gutter_visible ? (gd_m + 3) : 0;
-                    int text_width = COLS - 1 - gw_m;
-                    /* Walk file lines from scroll_y, accumulating visual rows,
-                     * to find which file line and column the click lands on. */
-                    int phys = 2;
-                    int found = 0;
-                    for (int i = scroll_y; i < line_count && phys < LINES - 2; i++) {
-                        int ll = utf8_display_width(lines[i]);
-                        int vrows = (ll == 0) ? 1 : (ll / text_width) + 1;
-                        if (click_row < phys + vrows) {
-                            /* click is within this file line */
-                            int row_within = click_row - phys;
-                            int col_within = click_col - gw_m;
-                            if (col_within < 0) col_within = 0;
-                            int new_cx = row_within * text_width + col_within;
-                            if (new_cx > ll) new_cx = ll;
-                            current_line = i;
-                            cursor_x = new_cx;
-                            found = 1;
-                            break;
-                        }
-                        phys += vrows;
-                    }
-                    /* click below last line: move to end of file */
-                    if (!found && line_count > 0) {
-                        current_line = line_count - 1;
-                        cursor_x = (int)strlen(lines[current_line]);
-                    }
-                }
-                } /* end BUTTON1_PRESSED */
-            }
+            handle_mouse_event();
         }
         else if (ch == KEY_UP) {
             if (current_line > 0) {
                 current_line--;
-                { int gd_u=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_u++;}
-                int available_width = COLS - 1 - (gutter_visible ? (gd_u + 3) : 0);
-                int visual_rows_above = 0;
-                for (int i = scroll_y; i < current_line; i++) {
-                    int l_dw = utf8_display_width(lines[i]);
-                    visual_rows_above += (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
-                }
-                if (visual_rows_above < 3 && scroll_y > 0) {
-                    while (scroll_y > 0 && visual_rows_above < 3) {
-                        scroll_y--;
-                        visual_rows_above = 0;
-                        for (int i = scroll_y; i < current_line; i++) {
-                            int l_dw = utf8_display_width(lines[i]);
-                            visual_rows_above += (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
+                {
+                    int gd_u = 1; int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd_u++; }
+                    int available_width = COLS - 1 - (gutter_visible ? (gd_u + 3) : 0);
+                    int visual_rows_above = 0;
+                    for (int i = scroll_y; i < current_line; i++) {
+                        int l_dw = utf8_display_width(lines[i]);
+                        visual_rows_above += (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
+                    }
+                    if (visual_rows_above < 3 && scroll_y > 0) {
+                        while (scroll_y > 0 && visual_rows_above < 3) {
+                            scroll_y--;
+                            visual_rows_above = 0;
+                            for (int i = scroll_y; i < current_line; i++) {
+                                int l_dw = utf8_display_width(lines[i]);
+                                visual_rows_above += (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
+                            }
                         }
                     }
-                } }
+                }
                 int len = strlen(lines[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
@@ -1875,20 +1705,22 @@ int main(int argc, char *argv[]) {
             if (current_line < line_count - 1) {
                 current_line++;
                 int max_displayable_lines = LINES - 4;
-                { int gd_d=1; int tmp=line_count; while(tmp>=10){tmp/=10;gd_d++;}
-                int available_width = COLS - 1 - (gutter_visible ? (gd_d + 3) : 0);
-                int visual_row_index = 0;
-                for (int i = scroll_y; i <= current_line; i++) {
-                    int l_dw = utf8_display_width(lines[i]);
-                    int l_rows = (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
-                    if (i < current_line) visual_row_index += l_rows;
-                    else visual_row_index += (utf8_display_width_n(lines[i], cursor_x) / available_width);
+                {
+                    int gd_d = 1; int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd_d++; }
+                    int available_width = COLS - 1 - (gutter_visible ? (gd_d + 3) : 0);
+                    int visual_row_index = 0;
+                    for (int i = scroll_y; i <= current_line; i++) {
+                        int l_dw = utf8_display_width(lines[i]);
+                        int l_rows = (l_dw == 0) ? 1 : (l_dw / available_width) + 1;
+                        if (i < current_line) visual_row_index += l_rows;
+                        else visual_row_index += (utf8_display_width_n(lines[i], cursor_x) / available_width);
+                    }
+                    if (max_displayable_lines - visual_row_index <= 3) {
+                        scroll_y++;
+                        if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
+                        if (scroll_y < 0) scroll_y = 0;
+                    }
                 }
-                if (max_displayable_lines - visual_row_index <= 3) {
-                    scroll_y++;
-                    if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
-                    if (scroll_y < 0) scroll_y = 0;
-                } }
                 int len = strlen(lines[current_line]);
                 if (cursor_x > len) cursor_x = len;
             }
@@ -1957,7 +1789,6 @@ int main(int argc, char *argv[]) {
             cursor_x = (int)strlen(lines[current_line]);
         }
         else if (ch == KEY_HOME || ch == CTRL_KEY('a')) {
-            /* First press: jump to first non-whitespace; second press: column 0 */
             int first_nws = 0;
             while (first_nws < (int)strlen(lines[current_line]) &&
                    isspace((unsigned char)lines[current_line][first_nws]))
@@ -1968,7 +1799,6 @@ int main(int argc, char *argv[]) {
             if (read_only_mode) {
                 snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
             } else {
-                /* Tab  record as bulk (multi-char insert) */
                 int len = strlen(lines[current_line]);
                 int is_makefile = (strstr(current_filename, "Makefile") != NULL);
                 int tab_size = is_makefile ? 1 : 4;
@@ -1991,7 +1821,6 @@ int main(int argc, char *argv[]) {
             if (read_only_mode) {
                 snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
             } else {
-                /* Shift+Tab  dedent: remove up to one tab-width of leading spaces */
                 int is_makefile = (strstr(current_filename, "Makefile") != NULL);
                 int tab_size = is_makefile ? 1 : 4;
                 int removed = 0;
@@ -2001,7 +1830,6 @@ int main(int argc, char *argv[]) {
                     memmove(lines[current_line], lines[current_line] + 1, ll);
                     removed++;
                 }
-                /* also handle a leading hard tab */
                 if (removed == 0 && lines[current_line][0] == '\t') {
                     int ll = (int)strlen(lines[current_line]);
                     memmove(lines[current_line], lines[current_line] + 1, ll);
@@ -2015,132 +1843,18 @@ int main(int argc, char *argv[]) {
             }
         }
         else if (ch == 10 || ch == 13) {
-            if (read_only_mode) {
-                snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
-            } else {
-                /* Enter  record line split */
-                if (!paste_batch_active) record_line_split(current_line, cursor_x);
-
-                /* Measure leading whitespace of the current line for auto-indent */
-                int indent_len = 0;
-
-                /* STEP 2B: Only calculate auto-indent if NOT currently pasting */
-                if (!is_pasting) {
-                    while (lines[current_line][indent_len] == ' ' ||
-                           lines[current_line][indent_len] == '\t')
-                        indent_len++;
-                    /* Only auto-indent if cursor is at or past the indented region */
-                    if (cursor_x < indent_len) indent_len = 0;
-                }
-
-                char *tail_text = lines[current_line] + cursor_x;
-                int tail_len = (int)strlen(tail_text);
-                char *new_line = malloc(indent_len + tail_len + 1);
-                if (new_line) {
-                    memcpy(new_line, lines[current_line], indent_len);
-                    memcpy(new_line + indent_len, tail_text, tail_len + 1);
-                } else {
-                    new_line = xstrdup(tail_text);
-                    indent_len = 0;
-                }
-                lines[current_line][cursor_x] = '\0';
-                insert_line_at(current_line + 1, new_line);
-                free(new_line);
-                current_line++; cursor_x = indent_len;
-                is_modified = 1;
-
-                /* Ensure the new line is always visible after Enter */
-                int max_displayable_lines = LINES - 4;
-                if (current_line >= scroll_y + max_displayable_lines) {
-                    scroll_y = current_line - max_displayable_lines + 1;
-                    if (scroll_y < 0) scroll_y = 0;
-                }
-            }
+            handle_enter_key(paste_batch_active);
         }
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (read_only_mode) {
-                snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
-            } else if (cursor_x > 0) {
-                /* Backspace within a line  record char deletion */
-                record_char_del(current_line, cursor_x - 1, lines[current_line][cursor_x - 1]);
-                int len = strlen(lines[current_line]);
-                memmove(lines[current_line] + cursor_x - 1,
-                        lines[current_line] + cursor_x,
-                        len - cursor_x + 1);
-                cursor_x--; is_modified = 1;
-            } else if (current_line > 0) {
-                /* Backspace at start of line  record line join */
-                int target = current_line - 1;
-                int target_len = strlen(lines[target]);
-                int cur_len = strlen(lines[current_line]);
-                char *merged = malloc(target_len + cur_len + 1);
-                if (merged) {
-                    record_line_join(target, target_len, lines[current_line]);
-                    memcpy(merged, lines[target], target_len);
-                    memcpy(merged + target_len, lines[current_line], cur_len + 1);
-                    free(lines[target]); lines[target] = merged;
-                    remove_line_at(current_line);
-                    current_line--; cursor_x = target_len;
-                    is_modified = 1;
-                    if (current_line < scroll_y) scroll_y = current_line;
-                }
-            }
+            handle_backspace();
         }
         else if (ch == KEY_DC || ch == 330) {
-            if (read_only_mode) {
-                snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
-            } else {
-                int len = strlen(lines[current_line]);
-                if (cursor_x < len) {
-                    /* Delete key within a line  record char deletion */
-                    record_char_del(current_line, cursor_x, lines[current_line][cursor_x]);
-                    memmove(lines[current_line] + cursor_x,
-                            lines[current_line] + cursor_x + 1,
-                            len - cursor_x);
-                    is_modified = 1;
-                } else if (current_line < line_count - 1) {
-                    /* Delete at end of line  record line join */
-                    int next = current_line + 1;
-                    int next_len = strlen(lines[next]);
-                    char *merged = malloc(len + next_len + 1);
-                    if (merged) {
-                        record_line_join(current_line, len, lines[next]);
-                        memcpy(merged, lines[current_line], len);
-                        memcpy(merged + len, lines[next], next_len + 1);
-                        free(lines[current_line]); lines[current_line] = merged;
-                        remove_line_at(next);
-                        is_modified = 1;
-                    }
-                }
-            }
+            handle_delete_key();
         }
         else if (ch >= 32 && ch <= 126) {
-            if (read_only_mode) {
-                snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
-            } else {
-                int len = strlen(lines[current_line]);
-                if (!paste_batch_active) {
-                    /* Record char insert; group consecutive chars on same line */
-                    record_char_ins(current_line, cursor_x, (char)ch);
-                }
-                if (overwrite_mode && cursor_x < len) {
-                    lines[current_line][cursor_x] = (char)ch;
-                } else {
-                    char *new_line = malloc(len + 2);
-                    if (new_line) {
-                        memcpy(new_line, lines[current_line], cursor_x);
-                        new_line[cursor_x] = (char)ch;
-                        memcpy(new_line + cursor_x + 1, lines[current_line] + cursor_x, len - cursor_x + 1);
-                        free(lines[current_line]); lines[current_line] = new_line;
-                    }
-                }
-                tracker_set_modified(current_line, cursor_x, 1);
-                cursor_x++; is_modified = 1;
-                mod_count++;
-                if (mod_count >= 50) { auto_save(); mod_count = 0; }
-            }
+            handle_printable_char(ch, paste_batch_active);
         }
-    } /* end while(1) */
+    }
 
     for (int i = 0; i < undo_count; i++) free_op(&undo_buf[(undo_head + i) % UNDO_CAP]);
     free(undo_buf);
@@ -2151,8 +1865,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < line_count; i++) free(lines[i]);
     free(lines);
 
-    /* disable bracketed paste mode before exiting */
-    printf("\033[?20041");
+    printf("\033[?2004l");
     fflush(stdout);
 
     endwin();
