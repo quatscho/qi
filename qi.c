@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.32 (2026)
+ * Version: 1.1.33 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.32"
+#define VERSION "1.1.33"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1147,10 +1147,13 @@ static void process_line_ranges_interactive(int is_cut_mode) {
             clipboard_line = malloc(total_bytes + 1);
             if (clipboard_line) {
                 clipboard_line[0] = '\0';
+                char *dst = clipboard_line;
                 for (int i = 0; i < line_count; i++) {
                     if (to_process[i]) {
-                        strcat(clipboard_line, lines[i]);
-                        strcat(clipboard_line, "\n");
+                        size_t len = strlen(lines[i]);
+                        memcpy(dst, lines[i], len);
+                        dst += len;
+                        *dst++ = '\n';
                     }
                 }
             }
@@ -1555,16 +1558,25 @@ int main(int argc, char *argv[]) {
             if (clipboard_line && strlen(clipboard_line) > 0) {
                 record_bulk(current_line, line_count - current_line);
 
-                char *clip_copy = xstrdup(clipboard_line);
-                char *line_tok = strtok(clip_copy, "\n");
+                const char *p = clipboard_line;
                 int inserted = 0;
 
-                while (line_tok != NULL) {
-                    insert_line_at(current_line + inserted, line_tok);
-                    inserted++;
-                    line_tok = strtok(NULL, "\n");
+                while (*p != '\0') {
+                    const char *next_nl = strchr(p, '\n');
+                    size_t len = next_nl ? (size_t)(next_nl - p) : strlen(p);
+
+                    char *line_buf = malloc(len + 1);
+                    if (line_buf) {
+                        memcpy(line_buf, p, len);
+                        line_buf[len] = '\0';
+                        insert_line_at(current_line + inserted, line_buf);
+                        free(line_buf);
+                        inserted++;
+                    }
+
+                    if (!next_nl) break;
+                    p = next_nl + 1;
                 }
-                free(clip_copy);
 
                 cursor_x = 0;
                 is_modified = 1;
