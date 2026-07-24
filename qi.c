@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.31 (2026)
+ * Version: 1.1.32 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.31"
+#define VERSION "1.1.32"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1055,14 +1055,19 @@ void goto_line() {
     if (scroll_y < 0) scroll_y = 0;
 }
 
-/* ---------- delete lines ---------- */
-void delete_lines_interactive() {
-    char input[256]; int idx = 0; input[0] = '\0';
-    const char *prompt = "Delete lines (e.g., 3, 5, 10-25 or !20-25): "; int prompt_len = strlen(prompt);
+/* Helper to prompt for line numbers/ranges and perform either cut or delete */
+static void process_line_ranges_interactive(int is_cut_mode) {
+    char input[256];
+    int idx = 0;
+    input[0] = '\0';
 
-    /* Keep noecho active so ncurses never prints ^D or control characters */
+    const char *prompt = is_cut_mode
+        ? "Cut lines (e.g., 3, 5, 10-25 or !20-25): "
+        : "Delete lines (e.g., 3, 5, 10-25 or !20-25): ";
+    int prompt_len = (int)strlen(prompt);
+
     noecho();
-    mvprintw(LINES - 1, 0, "\045s", prompt);
+    mvprintw(LINES - 1, 0, "%s", prompt);
     clrtoeol();
     refresh();
 
@@ -1081,7 +1086,7 @@ void delete_lines_interactive() {
         } else if (ch >= 32 && ch <= 126) {
             input[idx++] = (char)ch;
             input[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len + idx - 1, "\045c", ch);
+            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch);
             refresh();
         }
     }
@@ -1092,68 +1097,106 @@ void delete_lines_interactive() {
     strncpy(saved_input_copy, input, sizeof(saved_input_copy) - 1);
     saved_input_copy[sizeof(saved_input_copy) - 1] = '\0';
 
-    /* Build deletion bitmap  use heap to avoid VLA issues on large files */
-    char *to_delete = calloc(line_count, sizeof(char));
-    if (!to_delete) return;
+    char *to_process = calloc(line_count, sizeof(char));
+    if (!to_process) return;
 
     save_undo_state_batch(0, line_count);
 
     /* Check for leading '!' inversion operator */
     char *p = input;
-    while (*p == ' ' || *p == '\t') p++; /* Skip leading whitespace */
+    while (*p == ' ' || *p == '\t') p++;
 
     int invert = 0;
     if (*p == '!') {
         invert = 1;
-        p++; /* Skip the '!' character */
+        p++;
     }
 
     char *token = strtok(p, ",");
     while (token != NULL) {
         while (*token == ' ' || *token == '\t') token++;
         int start = 0, end = 0;
-        if (sscanf(token, "\045d-\045d", &start, &end) == 2) {
+        if (sscanf(token, "%d-%d", &start, &end) == 2) {
             if (start > 0 && end >= start)
-            for (int i = start; i <= end && i <= line_count; i++) to_delete[i - 1] = 1;
-        } else if (sscanf(token, "\045d", &start) == 1) {
-            if (start > 0 && start <= line_count) to_delete[start - 1] = 1;
+                for (int i = start; i <= end && i <= line_count; i++) to_process[i - 1] = 1;
+        } else if (sscanf(token, "%d", &start) == 1) {
+            if (start > 0 && start <= line_count) to_process[start - 1] = 1;
         }
         token = strtok(NULL, ",");
     }
 
-    /* Apply '!' inversion if specified */
     if (invert) {
         for (int i = 0; i < line_count; i++) {
-            to_delete[i] = !to_delete[i];
+            to_process[i] = !to_process[i];
         }
     }
 
-    int deleted_count = 0;
+    /* If cut mode is enabled, build a multi-line string for clipboard_line */
+    if (is_cut_mode) {
+        free(clipboard_line);
+        clipboard_line = NULL;
+
+        size_t total_bytes = 0;
+        for (int i = 0; i < line_count; i++) {
+            if (to_process[i]) {
+                total_bytes += strlen(lines[i]) + 1; /* +1 for newline */
+            }
+        }
+
+        if (total_bytes > 0) {
+            clipboard_line = malloc(total_bytes + 1);
+            if (clipboard_line) {
+                clipboard_line[0] = '\0';
+                for (int i = 0; i < line_count; i++) {
+                    if (to_process[i]) {
+                        strcat(clipboard_line, lines[i]);
+                        strcat(clipboard_line, "\n");
+                    }
+                }
+            }
+        } else {
+            clipboard_line = xstrdup("");
+        }
+    }
+
+    /* Remove lines in reverse order to keep indices aligned */
+    int processed_count = 0;
     for (int i = line_count - 1; i >= 0; i--) {
-        if (to_delete[i]) {
+        if (to_process[i]) {
             remove_line_at(i);
-            deleted_count++;
+            processed_count++;
             if (i <= current_line && current_line > 0) current_line--;
         }
     }
-    free(to_delete);
+    free(to_process);
 
     if (line_count == 0) {
         ensure_capacity(1); lines[0] = xstrdup(""); line_count = 1;
         current_line = 0; cursor_x = 0;
     }
-    int len = strlen(lines[current_line]);
+    int len = (int)strlen(lines[current_line]);
     if (cursor_x > len) cursor_x = len;
     int max_displayable_lines = LINES - 4;
     if (scroll_y > line_count - max_displayable_lines) scroll_y = line_count - max_displayable_lines;
     if (scroll_y < 0) scroll_y = 0;
 
-    if (deleted_count > 0) {
+    if (processed_count > 0) {
         is_modified = 1;
-        snprintf(status_msg, sizeof(status_msg), "Deleted lines \045s", saved_input_copy);
+        snprintf(status_msg, sizeof(status_msg), "%s lines %s",
+                 is_cut_mode ? "Cut" : "Deleted", saved_input_copy);
     } else {
-        snprintf(status_msg, sizeof(status_msg), "No lines deleted.");
+        snprintf(status_msg, sizeof(status_msg), "No lines %s.",
+                 is_cut_mode ? "cut" : "deleted");
     }
+}
+
+/* ---------- delete / cut lines ---------- */
+void delete_lines_interactive() {
+    process_line_ranges_interactive(0);
+}
+
+void cut_lines_interactive() {
+    process_line_ranges_interactive(1);
 }
 
 /* ---------- help window ---------- */
@@ -1190,7 +1233,7 @@ void show_help_window() {
         { "Ctrl+B",        "Bottom of file",             0 },
         { "Ctrl+A",        "Line start (smart)",         0 },
         { "Ctrl+E",        "Line end",                   0 },
-        { "%",             "Jump to matching bracket",   0 },
+        { "ALT/OPT+B",     "Jump to matching bracket",   0 },
         { "",              "",                            0 },
         { "VIEW",          NULL,                         1 },
         { "F4",            "Toggle gutter / col-81",     0 },
@@ -1356,7 +1399,27 @@ int main(int argc, char *argv[]) {
         if (ch == 27) { /* ESC key */
             nodelay(stdscr, TRUE);
             int next1 = getch();
-            int next2 = getch();
+
+            /* Option/Alt+B: Jump to matching bracket */
+            if (next1 == 'b' || next1 == 'B') {
+                nodelay(stdscr, FALSE);
+                if (find_matching_bracket(current_line, cursor_x)) {
+                    current_line = match_line;
+                    cursor_x    = match_col;
+                    /* Scroll so the destination is visible */
+                    int mdl = LINES - 4;
+                    if (current_line < scroll_y)
+                        scroll_y = current_line;
+                    else if (current_line >= scroll_y + mdl)
+                        scroll_y = current_line - mdl + 1;
+                    if (scroll_y < 0) scroll_y = 0;
+                } else {
+                    snprintf(status_msg, sizeof(status_msg), "No matching bracket.");
+                }
+                continue;
+            }
+
+            int next2 = (next1 != ERR) ? getch() : ERR;
 
             if (next1 == '[' && next2 == '2') {
                 char seq[16] = {0};
@@ -1485,47 +1548,27 @@ int main(int argc, char *argv[]) {
             scroll_y = current_line - max_displayable_lines + 1;
             if (scroll_y < 0) scroll_y = 0;
         }
-        else if (ch == CTRL_KEY('k')) {
-        /* Cut current line into clipboard */
-            record_bulk(current_line, 1);
-
-            // Fix 1: Ensure we only copy if the line actually has content
-            if (lines[current_line] != NULL) {
-                 free(clipboard_line);
-                 clipboard_line = xstrdup(lines[current_line]);
-
-                 // Safety check for memory allocation/empty results
-                 if (clipboard_line == NULL || strlen(clipboard_line) == 0) {
-                      clipboard_line = strdup(""); // Fallback to empty string if null
-                 }
-            }
-
-            if (line_count > 1) {
-                 remove_line_at(current_line);
-                 // Ensure current_line stays within bounds after the shift
-                 if (current_line >= line_count) {
-                      current_line = line_count - 1;
-                 }
-            } else {
-                 // For single-line files, clear content but maintain count
-                 free(lines[0]);
-                 lines[0] = xstrdup("");
-            }
-
-            cursor_x = 0;
-            if (current_line < scroll_y) scroll_y = current_line;
-            is_modified = 1;
-            snprintf(status_msg, sizeof(status_msg), "Line cut.");
+        else if (ch == CTRL_KEY('k') || ch == CTRL_KEY('K') || ch == 11) {
+            cut_lines_interactive();
         }
-
         else if (ch == CTRL_KEY('p')) {
-            /* Paste clipboard line above current line */
-            if (clipboard_line) {
+            if (clipboard_line && strlen(clipboard_line) > 0) {
                 record_bulk(current_line, line_count - current_line);
-                insert_line_at(current_line, clipboard_line);
+
+                char *clip_copy = xstrdup(clipboard_line);
+                char *line_tok = strtok(clip_copy, "\n");
+                int inserted = 0;
+
+                while (line_tok != NULL) {
+                    insert_line_at(current_line + inserted, line_tok);
+                    inserted++;
+                    line_tok = strtok(NULL, "\n");
+                }
+                free(clip_copy);
+
                 cursor_x = 0;
                 is_modified = 1;
-                snprintf(status_msg, sizeof(status_msg), "Line pasted.");
+                snprintf(status_msg, sizeof(status_msg), "Pasted %d line(s).", inserted);
             } else {
                 snprintf(status_msg, sizeof(status_msg), "Clipboard is empty.");
             }
@@ -1581,22 +1624,6 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 } /* end BUTTON1_PRESSED */
-            }
-        }
-        else if (ch == '%') {
-            /* Jump to matching bracket */
-            if (find_matching_bracket(current_line, cursor_x)) {
-                current_line = match_line;
-                cursor_x    = match_col;
-                /* Scroll so the destination is visible */
-                int mdl = LINES - 4;
-                if (current_line < scroll_y)
-                    scroll_y = current_line;
-                else if (current_line >= scroll_y + mdl)
-                    scroll_y = current_line - mdl + 1;
-                if (scroll_y < 0) scroll_y = 0;
-            } else {
-                snprintf(status_msg, sizeof(status_msg), "No matching bracket.");
             }
         }
         else if (ch == KEY_UP) {
