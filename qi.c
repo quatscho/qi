@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.37 (2026)
+ * Version: 1.1.38 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -29,7 +29,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.37"
+#define VERSION "1.1.38"
 
 #ifndef BUTTON5_PRESSED
 #define BUTTON5_PRESSED BUTTON2_PRESSED
@@ -75,6 +75,7 @@ clock_t last_char_time = 0;
 int in_paste_stream = 0;
 static int is_pasting = 0;
 static int read_only_mode = 0;
+int create_backup = 0;
 
 static time_t file_mtime = 0;
 static volatile sig_atomic_t got_fatal_signal = 0;
@@ -526,6 +527,32 @@ void save_file(void) {
         strncpy(current_filename, filename, sizeof(current_filename) - 1);
         current_filename[sizeof(current_filename) - 1] = '\0';
     }
+
+    /* ---------- Backup Logic (-b / --backup) ---------- */
+    if (create_backup) {
+        struct stat st;
+        /* Only create a backup if the original file already exists on disk */
+        if (stat(current_filename, &st) == 0) {
+            char bak_filename[300];
+            snprintf(bak_filename, sizeof(bak_filename), "%s.bak", current_filename);
+
+            FILE *src = fopen(current_filename, "rb");
+            if (src) {
+                FILE *dst = fopen(bak_filename, "wb");
+                if (dst) {
+                    char buf[4096];
+                    size_t bytes;
+                    while ((bytes = fread(buf, 1, sizeof(buf), src)) > 0) {
+                        fwrite(buf, 1, bytes, dst);
+                    }
+                    fclose(dst);
+                }
+                fclose(src);
+            }
+        }
+    }
+
+    /* ---------- Main File Saving ---------- */
     FILE *fp = fopen(current_filename, "w");
     if (fp) {
         for (int i = 0; i < line_count; i++) {
@@ -544,7 +571,11 @@ void save_file(void) {
         struct stat st;
         file_mtime = (stat(current_filename, &st) == 0) ? st.st_mtime : 0;
 
-        snprintf(status_msg, sizeof(status_msg), "Saved successfully to '%s'!", current_filename);
+        if (create_backup) {
+            snprintf(status_msg, sizeof(status_msg), "Saved to '%s' (backup created: '%s.bak')", current_filename, current_filename);
+        } else {
+            snprintf(status_msg, sizeof(status_msg), "Saved successfully to '%s'!", current_filename);
+        }
     } else {
         mvprintw(LINES - 1, 0, "Error: Could not save file! Press any key...");
         clrtoeol(); refresh(); getch();
@@ -1415,14 +1446,24 @@ int main(int argc, char *argv[]) {
 
     /* ---------- Command Line Flags ---------- */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-h") == 0) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printf("Usage: qi [options] [filename] [+line|:line]\n\n");
             printf("Options:\n");
-            printf("  -h      Display this help message\n");
-            printf("  -r      Open file in read-only mode\n");
+            printf("  -h, --help             Display this help message\n");
+            printf("  -v, --version          Display version information\n");
+            printf("  -r, --read-only        Open file in read-only mode\n");
+            printf("  -L, --no-line-numbers  Disable line numbers on startup\n");
+            printf("  -b, --backup           Create a backup copy before saving\n");
             return 0;
-        } else if (strcmp(argv[i], "-r") == 0 ) {
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            printf("qi text editor v%s\n", VERSION);
+            return 0;
+        } else if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--read-only") == 0) {
             read_only_mode = 1;
+        } else if (strcmp(argv[i], "-L") == 0 || strcmp(argv[i], "--no-line-numbers") == 0) {
+            gutter_visible = 0;
+        } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--backup") == 0) {
+            create_backup = 1;
         } else if (argv[i][0] == '+' || argv[i][0] == ':') {
             target_line_arg = argv[i];
         } else if (!target_filename) {
