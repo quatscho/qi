@@ -1413,8 +1413,15 @@ int main(int argc, char *argv[]) {
     char *target_filename = NULL;
     char *target_line_arg = NULL;
 
+    /* ---------- Command Line Flags ---------- */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-R") == 0) {
+        if (strcmp(argv[i], "-h") == 0) {
+            printf("Usage: qi [options] [filename] [+line|:line]\n\n");
+            printf("Options:\n");
+            printf("  -h      Display this help message\n");
+            printf("  -r      Open file in read-only mode\n");
+            return 0;
+        } else if (strcmp(argv[i], "-r") == 0 ) {
             read_only_mode = 1;
         } else if (argv[i][0] == '+' || argv[i][0] == ':') {
             target_line_arg = argv[i];
