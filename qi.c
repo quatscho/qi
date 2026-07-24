@@ -29,7 +29,8 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.38"
+#define QI_VERSION "1.1.38"
+#define VERSION QI_VERSION
 
 #ifndef BUTTON5_PRESSED
 #define BUTTON5_PRESSED BUTTON2_PRESSED
@@ -100,6 +101,7 @@ void save_undo_state_batch(int start_line, int count);
 void undo(void);
 void redo_op(void);
 void draw_screen(void);
+void show_about_window(void);
 
 /* ---------- Signal Handler ---------- */
 static void fatal_signal_handler(int sig) {
@@ -1140,6 +1142,50 @@ static void process_line_ranges_interactive(int is_cut_mode) {
 void delete_lines_interactive(void) { process_line_ranges_interactive(0); }
 void cut_lines_interactive(void) { process_line_ranges_interactive(1); }
 
+/* ---------- About Dialog ---------- */
+void show_about_window(void) {
+    int height = 14;
+    int width = 70;
+    int start_y = (LINES - height) / 2;
+    int start_x = (COLS - width) / 2;
+
+    WINDOW *about_win = newwin(height, width, start_y, start_x);
+    box(about_win, 0, 0);
+
+    // Apply header style matching the help window
+    wattron(about_win, A_BOLD);
+    mvwprintw(about_win, 0, (width - 10) / 2, " About qi ");
+    wattroff(about_win, A_BOLD);
+
+    // Render content lines
+    mvwprintw(about_win, 2, 4, "qi - Quick Interactive Text Editor");
+    mvwprintw(about_win, 3, 4, "Version %s", QI_VERSION); // Defined macro (e.g., "1.1.38")
+
+    mvwprintw(about_win, 5, 4, "A lightweight, terminal-based text editor built for");
+    mvwprintw(about_win, 6, 4, "speed, low footprint, and simple keyboard workflows.");
+
+    mvwprintw(about_win, 8, 4, "License: GNU General Public License v3.0 (GPLv3)");
+    mvwprintw(about_win, 9, 4, "Repository: https://github.com/quatscho/qi");
+
+    wattron(about_win, A_DIM);
+    mvwprintw(about_win, 11, (width - 29) / 2, "[ Press ESC or 'q' to close ]");
+    wattroff(about_win, A_DIM);
+
+    wrefresh(about_win);
+
+    // Modal event loop
+    int ch;
+    while ((ch = wgetch(about_win)) != -1) {
+        if (ch == 27 || ch == 'q' || ch == 'Q') { // 27 = ESC
+            break;
+        }
+    }
+
+    delwin(about_win);
+    touchwin(stdscr); // Force main screen refresh
+    refresh();
+}
+
 /* ---------- Help Dialog ---------- */
 void show_help_window(void) {
     struct HelpEntry { const char *key; const char *desc; int is_header; };
@@ -1173,6 +1219,7 @@ void show_help_window(void) {
         { "Ctrl+A",        "Line start (smart)",         0 },
         { "Ctrl+E",        "Line end",                   0 },
         { "ALT/OPT+B",     "Jump to matching bracket",   0 },
+        { "ALT/OPT+A",     "Show About dialog",          0 },
         { "",              "",                            0 },
         { "VIEW",          NULL,                         1 },
         { "F3",            "Toggle Read-Only Mode",      0 },
@@ -1532,6 +1579,12 @@ int main(int argc, char *argv[]) {
             nodelay(stdscr, TRUE);
             int next1 = getch();
 
+            if (next1 == 'a' || next1 == 'A') {
+                nodelay(stdscr, FALSE);
+                show_about_window();
+                continue;
+            }
+
             if (next1 == 'b' || next1 == 'B') {
                 nodelay(stdscr, FALSE);
                 if (find_matching_bracket(current_line, cursor_x)) {
@@ -1809,7 +1862,10 @@ int main(int argc, char *argv[]) {
                 cursor_x = 0;
             } else {
                 int next1 = getch();
-                if (next1 == 'b') {
+                if (next1 == 'a' || next1 == 'A') {
+                    show_about_window();
+                    continue;
+                } else if (next1 == 'b') {
                     if (cursor_x > 0) {
                         while (cursor_x > 0 && isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
                         while (cursor_x > 0 && !isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
