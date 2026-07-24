@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.33 (2026)
+ * Version: 1.1.34 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.33"
+#define VERSION "1.1.34"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -844,13 +844,34 @@ void find_text() {
     int prompt_len = strlen(prompt);
 
     noecho();
-    mvprintw(LINES - 1, 0, "\045s", prompt);
+    mvprintw(LINES - 1, 0, "%s", prompt);
     clrtoeol();
     refresh();
 
     while (idx < (int)sizeof(search_str) - 1) {
         int ch = getch();
-        if (ch == 27) { status_msg[0] = '\0'; return; }
+        if (ch == 27) {
+            /* Intercept bracketed paste mode sequences (\033[200~ / \033[201~) */
+            nodelay(stdscr, TRUE);
+            int next1 = getch();
+            if (next1 == '[') {
+                int next2 = getch();
+                if (next2 == '2') {
+                    /* Consume paste boundary tag up to '~' */
+                    int seq_char;
+                    while ((seq_char = getch()) != ERR && seq_char != '~');
+                    nodelay(stdscr, FALSE);
+                    continue;
+                }
+                if (next2 != ERR) ungetch(next2);
+            }
+            if (next1 != ERR) ungetch(next1);
+            nodelay(stdscr, FALSE);
+
+            /* Actual ESC key press: abort search */
+            status_msg[0] = '\0';
+            return;
+        }
         else if (ch == 10 || ch == 13) break;
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (idx > 0) {
@@ -860,7 +881,7 @@ void find_text() {
             }
         } else if (ch >= 32 && ch <= 126) {
             search_str[idx++] = (char)ch; search_str[idx] = '\0';
-            mvprintw(LINES - 1, prompt_len + idx - 1, "\045c", ch); refresh();
+            mvprintw(LINES - 1, prompt_len + idx - 1, "%c", ch); refresh();
         }
     }
     if (strlen(search_str) == 0) return;
@@ -892,7 +913,7 @@ void find_text() {
     }
 
     if (match_count == 0) {
-        snprintf(status_msg, sizeof(status_msg), "No matches found for '\045s'.", search_str);
+        snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str);
         return;
     }
 
@@ -919,13 +940,13 @@ void find_text() {
 
         draw_screen();
         snprintf(status_msg, sizeof(status_msg),
-                 "Match \045d of \045d [Next: Right/Down | Prev: Left/Up | Enter: Done]",
+                 "Match %d of %d [Next: Right/Down | Prev: Left/Up | Enter: Done]",
                  current_match_idx + 1, match_count);
         draw_screen();
 
         int ch = getch();
         if (ch == 10 || ch == 13) {
-            snprintf(status_msg, sizeof(status_msg), "Found match at line \045d.", current_line + 1);
+            snprintf(status_msg, sizeof(status_msg), "Found match at line %d.", current_line + 1);
             break;
         } else if (ch == 27) {
             status_msg[0] = '\0';
@@ -938,94 +959,166 @@ void find_text() {
     }
 }
 
+/* ---------- replace_text ---------- */
 void replace_text() {
     char search_str[128], replace_str[128];
     int idx = 0;
-    search_str[0] = replace_str[0] = '\0';
-    noecho();
+    search_str[0] = '\0';
+    replace_str[0] = '\0';
 
-    const char *prompt1 = "Find text to replace: ";
-    int p1_len = strlen(prompt1);
-    mvprintw(LINES - 1, 0, "%s", prompt1); clrtoeol(); refresh();
+    /* --- Step 1: Get Find String --- */
+    const char *prompt1 = "Find: ";
+    int prompt_len1 = strlen(prompt1);
+
+    noecho();
+    mvprintw(LINES - 1, 0, "%s", prompt1);
+    clrtoeol();
+    refresh();
+
     while (idx < (int)sizeof(search_str) - 1) {
         int ch = getch();
-        if (ch == 27) { status_msg[0] = '\0'; return; }
+        if (ch == 27) {
+            /* Intercept bracketed paste mode sequences (\033[200~ and \033[201~) */
+            nodelay(stdscr, TRUE);
+            int next1 = getch();
+            if (next1 == '[') {
+                int next2 = getch();
+                if (next2 == '2') {
+                    int seq_char;
+                    while ((seq_char = getch()) != ERR && seq_char != '~');
+                    nodelay(stdscr, FALSE);
+                    continue;
+                }
+                if (next2 != ERR) ungetch(next2);
+            }
+            if (next1 != ERR) ungetch(next1);
+            nodelay(stdscr, FALSE);
+
+            status_msg[0] = '\0';
+            return;
+        }
         else if (ch == 10 || ch == 13) break;
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) { idx--; search_str[idx] = '\0'; mvprintw(LINES-1,p1_len+idx," "); move(LINES-1,p1_len+idx); refresh(); }
-        } else if (ch >= 32 && ch <= 126) { search_str[idx++]=(char)ch; search_str[idx]='\0'; mvprintw(LINES-1,p1_len+idx-1,"%c",ch); refresh(); }
+            if (idx > 0) {
+                idx--; search_str[idx] = '\0';
+                mvprintw(LINES - 1, prompt_len1 + idx, " ");
+                move(LINES - 1, prompt_len1 + idx); refresh();
+            }
+        } else if (ch >= 32 && ch <= 126) {
+            search_str[idx++] = (char)ch; search_str[idx] = '\0';
+            mvprintw(LINES - 1, prompt_len1 + idx - 1, "%c", ch); refresh();
+        }
     }
-    if (strlen(search_str) == 0) return;
 
+    if (strlen(search_str) == 0) {
+        snprintf(status_msg, sizeof(status_msg), "Search cancelled (empty query).");
+        return;
+    }
+
+    /* --- Step 2: Get Replace String --- */
     idx = 0;
     const char *prompt2 = "Replace with: ";
-    int p2_len = strlen(prompt2);
-    mvprintw(LINES - 1, 0, "%s", prompt2); clrtoeol(); refresh();
+    int prompt_len2 = strlen(prompt2);
+
+    mvprintw(LINES - 1, 0, "%s", prompt2);
+    clrtoeol();
+    refresh();
+
     while (idx < (int)sizeof(replace_str) - 1) {
         int ch = getch();
-        if (ch == 27) { status_msg[0] = '\0'; return; }
+        if (ch == 27) {
+            /* Intercept bracketed paste mode sequences */
+            nodelay(stdscr, TRUE);
+            int next1 = getch();
+            if (next1 == '[') {
+                int next2 = getch();
+                if (next2 == '2') {
+                    int seq_char;
+                    while ((seq_char = getch()) != ERR && seq_char != '~');
+                    nodelay(stdscr, FALSE);
+                    continue;
+                }
+                if (next2 != ERR) ungetch(next2);
+            }
+            if (next1 != ERR) ungetch(next1);
+            nodelay(stdscr, FALSE);
+
+            status_msg[0] = '\0';
+            return;
+        }
         else if (ch == 10 || ch == 13) break;
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (idx > 0) { idx--; replace_str[idx]='\0'; mvprintw(LINES-1,p2_len+idx," "); move(LINES-1,p2_len+idx); refresh(); }
-        } else if (ch >= 32 && ch <= 126) { replace_str[idx++]=(char)ch; replace_str[idx]='\0'; mvprintw(LINES-1,p2_len+idx-1,"%c",ch); refresh(); }
-    }
-
-    struct { int line; int col; } matches[500];
-    int match_count = 0;
-    for (int i = 0; i < line_count; i++) {
-        char *ptr = lines[i];
-        while ((ptr = strstr(ptr, search_str)) != NULL) {
-            if (match_count < 500) { matches[match_count].line = i; matches[match_count].col = (int)(ptr - lines[i]); match_count++; }
-            ptr += strlen(search_str);
+            if (idx > 0) {
+                idx--; replace_str[idx] = '\0';
+                mvprintw(LINES - 1, prompt_len2 + idx, " ");
+                move(LINES - 1, prompt_len2 + idx); refresh();
+            }
+        } else if (ch >= 32 && ch <= 126) {
+            replace_str[idx++] = (char)ch; replace_str[idx] = '\0';
+            mvprintw(LINES - 1, prompt_len2 + idx - 1, "%c", ch); refresh();
         }
     }
-    if (match_count == 0) { snprintf(status_msg, sizeof(status_msg), "No matches found for '%s'.", search_str); return; }
 
-    save_undo_state_batch(0, line_count);
-    int current_idx = 0, replaced_count = 0, force_all = 0;
-    while (current_idx < match_count) {
-        int ln = matches[current_idx].line;
-        int col = matches[current_idx].col;
-        current_line = ln; cursor_x = col;
-        int max_displayable_lines = LINES - 4;
-        scroll_y = current_line - (max_displayable_lines / 2);
-        if (scroll_y < 0) scroll_y = 0;
+    /* --- Step 3: Execute Replacement --- */
+    int replacements = 0;
+    int search_len = strlen(search_str);
+    int replace_len = strlen(replace_str);
 
-        int choice = 'n';
-        if (!force_all) {
-            snprintf(status_msg, sizeof(status_msg),
-                     "Match %d of %d: Replace? (y: Yes | n: No | a: All | q: Quit/ESC)",
-                     current_idx + 1, match_count);
-            draw_screen(); choice = getch();
-        } else { choice = 'y'; }
+    if (search_len == 0) return;
 
-        if (choice == 'q' || choice == 27) break;
-        if (choice == 'a') { force_all = 1; choice = 'y'; }
-        if (choice == 'y') {
-            int search_len = strlen(search_str);
-            int replace_len = strlen(replace_str);
-            int old_len = strlen(lines[ln]);
-            int new_len = old_len - search_len + replace_len;
-            char *tmp = malloc(new_len + 1);
-            if (tmp) {
-                memcpy(tmp, lines[ln], col);
-                memcpy(tmp + col, replace_str, replace_len);
-                memcpy(tmp + col + replace_len, lines[ln] + col + search_len,
-                       old_len - col - search_len + 1);
-                free(lines[ln]); lines[ln] = tmp;
-                replaced_count++;
-                int delta = replace_len - search_len;
-                for (int j = current_idx + 1; j < match_count && matches[j].line == ln; j++)
-                    matches[j].col += delta;
+    for (int i = 0; i < line_count; i++) {
+        if (!lines[i]) continue;
+
+        char lower_line[MAX_LINE_LEN], lower_search[128];
+        int ll = strlen(lines[i]);
+        if (ll >= MAX_LINE_LEN) ll = MAX_LINE_LEN - 1;
+
+        for (int j = 0; j < ll; j++)
+            lower_line[j] = tolower((unsigned char)lines[i][j]);
+        lower_line[ll] = '\0';
+
+        for (int j = 0; j < search_len && j < 127; j++)
+            lower_search[j] = tolower((unsigned char)search_str[j]);
+        lower_search[search_len < 127 ? search_len : 127] = '\0';
+
+        /* Skip line if target string isn't present */
+        if (strstr(lower_line, lower_search) == NULL) {
+            continue;
+        }
+
+        char buffer[MAX_LINE_LEN];
+        int b_idx = 0;
+        int orig_idx = 0;
+
+        while (orig_idx < ll) {
+            if (orig_idx + search_len <= ll &&
+                strncmp(&lower_line[orig_idx], lower_search, search_len) == 0) {
+
+                /* Copy replacement string */
+                for (int r = 0; r < replace_len && b_idx < MAX_LINE_LEN - 1; r++) {
+                    buffer[b_idx++] = replace_str[r];
+                }
+                orig_idx += search_len;
+                replacements++;
+            } else {
+                /* Copy original character */
+                if (b_idx < MAX_LINE_LEN - 1) {
+                    buffer[b_idx++] = lines[i][orig_idx];
+                }
+                orig_idx++;
             }
         }
-        current_idx++;
+        buffer[b_idx] = '\0';
+
+        /* Reallocate lines[i] safely without overflowing heap chunk boundaries */
+        if (strcmp(lines[i], buffer) != 0) {
+            free(lines[i]);
+            lines[i] = strdup(buffer);
+            is_modified = 1;
+        }
     }
-    if (replaced_count > 0)
-        snprintf(status_msg, sizeof(status_msg), "Replaced %s with %s (%d instance%s)",
-                 search_str, replace_str, replaced_count, replaced_count == 1 ? "" : "s");
-    else
-        snprintf(status_msg, sizeof(status_msg), "No replacements made.");
+
+    snprintf(status_msg, sizeof(status_msg), "Replaced %d occurrence(s).", replacements);
 }
 
 /* ---------- goto line ---------- */
