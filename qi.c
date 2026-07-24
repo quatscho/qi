@@ -1408,6 +1408,7 @@ void show_help_window() {
         { "ALT/OPT+B",     "Jump to matching bracket",   0 },
         { "",              "",                            0 },
         { "VIEW",          NULL,                         1 },
+        { "F3",            "Toggle Read-Only Mode",      0 },
         { "F4",            "Toggle gutter / col-81",     0 },
         { "F5",            "Toggle syntax highlight",    0 },
         { "Ctrl+X",        "Toggle Insert/Overwrite",    0 },
