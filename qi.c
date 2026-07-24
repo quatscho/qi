@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.35 (2026)
+ * Version: 1.1.36 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -74,7 +74,7 @@ static int utf8_display_width_n(const char *s, int n) {
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
-#define VERSION "1.1.35"
+#define VERSION "1.1.36"
 
 /* ---------- dynamic line storage ---------- */
 static char **lines = NULL;   /* heap array of heap strings          */
@@ -1075,29 +1075,38 @@ void replace_text() {
         }
     }
 
-    /* --- Step 3: Execute Replacement --- */
+    /* --- Step 3: Interactive Confirmation & Replacement --- */
     int replacements = 0;
     int search_len = strlen(search_str);
     int replace_len = strlen(replace_str);
+    int replace_all = 0;
 
     if (search_len == 0) return;
+
+    /* Batch undo snapshot of the entire document before beginning replacements */
+    save_undo_state_batch(0, line_count);
 
     for (int i = 0; i < line_count; i++) {
         if (!lines[i]) continue;
 
+        int line_changed = 0;
+        char current_buf[MAX_LINE_LEN];
+        strncpy(current_buf, lines[i], sizeof(current_buf) - 1);
+        current_buf[MAX_LINE_LEN - 1] = '\0';
+
         char lower_line[MAX_LINE_LEN], lower_search[128];
-        int ll = strlen(lines[i]);
+        int ll = strlen(current_buf);
         if (ll >= MAX_LINE_LEN) ll = MAX_LINE_LEN - 1;
 
         for (int j = 0; j < ll; j++)
-            lower_line[j] = tolower((unsigned char)lines[i][j]);
+            lower_line[j] = tolower((unsigned char)current_buf[j]);
         lower_line[ll] = '\0';
 
         for (int j = 0; j < search_len && j < 127; j++)
             lower_search[j] = tolower((unsigned char)search_str[j]);
         lower_search[search_len < 127 ? search_len : 127] = '\0';
 
-        /* Skip line if target string isn't present */
+        /* Quick check if target exists in line */
         if (strstr(lower_line, lower_search) == NULL) {
             continue;
         }
@@ -1110,24 +1119,71 @@ void replace_text() {
             if (orig_idx + search_len <= ll &&
                 strncmp(&lower_line[orig_idx], lower_search, search_len) == 0) {
 
-                /* Copy replacement string */
-                for (int r = 0; r < replace_len && b_idx < MAX_LINE_LEN - 1; r++) {
-                    buffer[b_idx++] = replace_str[r];
+                int do_replace = 0;
+
+                if (replace_all) {
+                    do_replace = 1;
+                } else {
+                    /* Jump cursor and view to current match location */
+                    current_line = i;
+                    cursor_x = orig_idx;
+                    int max_displayable_lines = LINES - 4;
+                    scroll_y = current_line - (max_displayable_lines / 2);
+                    if (scroll_y < 0) scroll_y = 0;
+                    if (scroll_y > line_count - max_displayable_lines)
+                        scroll_y = line_count - max_displayable_lines;
+                    if (scroll_y < 0) scroll_y = 0;
+
+                    draw_screen();
+                    snprintf(status_msg, sizeof(status_msg),
+                             "Replace match at Ln %d, Col %d? [y]es / [n]o / [a]ll / [q]uit",
+                             current_line + 1, cursor_x + 1);
+                    draw_screen();
+
+                    int confirm = getch();
+                    if (confirm == 'y' || confirm == 'Y') {
+                        do_replace = 1;
+                    } else if (confirm == 'a' || confirm == 'A') {
+                        do_replace = 1;
+                        replace_all = 1;
+                    } else if (confirm == 'q' || confirm == 'Q' || confirm == 27) {
+                        /* Cancel out of replacement process */
+                        snprintf(status_msg, sizeof(status_msg),
+                                 "Replacement cancelled. Replaced %d occurrence(s).", replacements);
+                        return;
+                    } else {
+                        /* 'n' or any other key skips this match */
+                        do_replace = 0;
+                    }
                 }
-                orig_idx += search_len;
-                replacements++;
+
+                if (do_replace) {
+                    /* Copy replacement string */
+                    for (int r = 0; r < replace_len && b_idx < MAX_LINE_LEN - 1; r++) {
+                        buffer[b_idx++] = replace_str[r];
+                    }
+                    orig_idx += search_len;
+                    replacements++;
+                    line_changed = 1;
+                } else {
+                    /* Keep original char */
+                    if (b_idx < MAX_LINE_LEN - 1) {
+                        buffer[b_idx++] = current_buf[orig_idx];
+                    }
+                    orig_idx++;
+                }
             } else {
-                /* Copy original character */
+                /* Copy original char */
                 if (b_idx < MAX_LINE_LEN - 1) {
-                    buffer[b_idx++] = lines[i][orig_idx];
+                    buffer[b_idx++] = current_buf[orig_idx];
                 }
                 orig_idx++;
             }
         }
         buffer[b_idx] = '\0';
 
-        /* Reallocate lines[i] safely without overflowing heap chunk boundaries */
-        if (strcmp(lines[i], buffer) != 0) {
+        /* Update line if changes occurred */
+        if (line_changed && strcmp(lines[i], buffer) != 0) {
             free(lines[i]);
             lines[i] = strdup(buffer);
             is_modified = 1;
