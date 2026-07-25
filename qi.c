@@ -1269,7 +1269,7 @@ void show_help_window(void) {
     static const struct HelpEntry entries[] = {
         { "FILE",          NULL,                         1 },
         { "Ctrl+S",        "Save file",                  0 },
-        { "ALT/OPT+S",     "Save As",                    0 },
+        { "Alt/Opt+S",     "Save As",                    0 },
         { "Ctrl+O",        "Open file",                  0 },
         { "Ctrl+Q",        "Quit",                       0 },
         { "",              "",                            0 },
@@ -1284,12 +1284,12 @@ void show_help_window(void) {
         { "",              "",                            0 },
         { "EDITING",       NULL,                         1 },
         { "Ctrl+D",        "Delete line(s)",             0 },
-        { "Ctrl+SHIFT+K",  "Cut line",                   0 },
+        { "Ctrl+Shift+K",  "Cut line",                   0 },
         { "Ctrl+P",        "Paste line",                 0 },
         { "Ctrl+W",        "Delete word left",           0 },
         { "Ctrl+N",        "Duplicate line",             0 },
-        { "ALT/OPT+k",     "Swap line up",               0 },
-        { "ALT/OPT+j",     "Swap line down",             0 },
+        { "Alt/Opt+k",     "Swap line up",               0 },
+        { "Alt/Opt+j",     "Swap line down",             0 },
         { "Tab",           "Indent",                     0 },
         { "Shift+Tab",     "Dedent",                     0 },
         { "",              "",                            0 },
@@ -1298,7 +1298,7 @@ void show_help_window(void) {
         { "Ctrl+B",        "Bottom of file",             0 },
         { "Ctrl+A",        "Line start (smart)",         0 },
         { "Ctrl+E",        "Line end",                   0 },
-        { "ALT/OPT+B",     "Jump to matching bracket",   0 },
+        { "Alt/Opt+B",     "Jump to matching bracket",   0 },
         { "",              "",                            0 },
         { "VIEW",          NULL,                         1 },
         { "F3",            "Toggle Read-Only Mode",      0 },
@@ -1306,7 +1306,7 @@ void show_help_window(void) {
         { "F5",            "Toggle syntax highlight",    0 },
         { "Ctrl+X",        "Toggle Insert/Overwrite",    0 },
         { "Ctrl+?",        "This help screen",           0 },
-        { "ALT/OPT+A",     "Show About dialog",          0 },
+        { "Alt/Opt+A",     "Show About dialog",          0 },
     };
     int total = (int)(sizeof(entries) / sizeof(entries[0]));
 
