@@ -1,3 +1,4 @@
 qi
 *.swp
 *.bak
+.DS_Store
