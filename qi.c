@@ -29,8 +29,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define QI_VERSION "1.1.38"
-#define VERSION QI_VERSION
+#define VERSION "1.1.38"
 
 #ifndef BUTTON5_PRESSED
 #define BUTTON5_PRESSED BUTTON2_PRESSED
@@ -1158,8 +1157,8 @@ void show_about_window(void) {
     wattroff(about_win, A_BOLD);
 
     // Render content lines
-    mvwprintw(about_win, 2, 4, "qi - Quick Interactive Text Editor");
-    mvwprintw(about_win, 3, 4, "Version %s", QI_VERSION); // Defined macro (e.g., "1.1.38")
+    mvwprintw(about_win, 2, 4, "qi - A Lightweight Text Editor");
+    mvwprintw(about_win, 3, 4, "Version %s", VERSION);
 
     mvwprintw(about_win, 5, 4, "A lightweight, terminal-based text editor built for");
     mvwprintw(about_win, 6, 4, "speed, low footprint, and simple keyboard workflows.");
@@ -1219,7 +1218,6 @@ void show_help_window(void) {
         { "Ctrl+A",        "Line start (smart)",         0 },
         { "Ctrl+E",        "Line end",                   0 },
         { "ALT/OPT+B",     "Jump to matching bracket",   0 },
-        { "ALT/OPT+A",     "Show About dialog",          0 },
         { "",              "",                            0 },
         { "VIEW",          NULL,                         1 },
         { "F3",            "Toggle Read-Only Mode",      0 },
@@ -1227,6 +1225,7 @@ void show_help_window(void) {
         { "F5",            "Toggle syntax highlight",    0 },
         { "Ctrl+X",        "Toggle Insert/Overwrite",    0 },
         { "Ctrl+?",        "This help screen",           0 },
+        { "ALT/OPT+A",     "Show About dialog",          0 },
     };
     int total = (int)(sizeof(entries) / sizeof(entries[0]));
 
