@@ -883,22 +883,21 @@ void draw_screen(void) {
         int gd_s = 1; { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd_s++; } }
         int tw_s = COLS - 1 - (gd_s + 3);
         int vis_col = (tw_s > 0) ? (cursor_x % tw_s) + 1 : cursor_x + 1;
+
+        move(LINES -1, 0);
+        clrtoeol();
+
+        if (read_only_mode) {
+            attron(COLOR_PAIR(2) | A_BOLD);
+            printw("[RO Mode]  ");
+            attroff(COLOR_PAIR(2) | A_BOLD);
+        } else {
+            attron(COLOR_PAIR(5) | A_BOLD);
+            printw("[RW Mode]  ");
+            attroff(COLOR_PAIR(5) | A_BOLD);
+        }
+
         if (!is_modified) {
-            move(LINES - 1, 0);
-            clrtoeol();
-
-            if (read_only_mode) {
-                attron(COLOR_PAIR(2) | A_BOLD);
-                printw("[RO Mode]  ");
-                attroff(COLOR_PAIR(2) | A_BOLD);
-             }
-
-            if (!read_only_mode) {
-                attron(COLOR_PAIR(5) | A_BOLD);
-                printw("[RW Mode]  ");
-                attroff(COLOR_PAIR(5) | A_BOLD);
-            }
-
             printw("Ln: %d Col: %d | (Ctrl+? for Help)", current_line + 1, vis_col);
         } else {
             int total_chars = 0, modified_lines = 0;
@@ -906,22 +905,7 @@ void draw_screen(void) {
                 total_chars += (int)strlen(lines[i]);
                 if (tracker_is_modified(i, 0)) modified_lines++;
             }
-            move(LINES - 1, 0);
-            clrtoeol();
-
-            if (read_only_mode) {
-                attron(COLOR_PAIR(2) | A_BOLD);
-                printw("[RO Mode]  ");
-                attroff(COLOR_PAIR(2) | A_BOLD);
-             }
-
-            if (!read_only_mode) {
-                attron(COLOR_PAIR(5) | A_BOLD);
-                printw("[RW Mode]  ");
-                attroff(COLOR_PAIR(5) | A_BOLD);
-            }
-
-             printw("Lines Mod: %d | Total Chars: %d | Ln: %d Col: %d | (Ctrl+? for Help)",
+            printw("Lines Mod: %d | Total Chars: %d | Ln: %d Col: %d | (Ctrl+? for Help)",
                 modified_lines, total_chars, current_line + 1, vis_col);
         }
     }
