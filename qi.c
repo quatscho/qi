@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.38 (2026)
+ * Version: 1.1.39 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -29,7 +29,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.38"
+#define VERSION "1.1.39"
 
 #ifndef BUTTON5_PRESSED
 #define BUTTON5_PRESSED BUTTON2_PRESSED
@@ -106,6 +106,54 @@ void show_about_window(void);
 static void fatal_signal_handler(int sig) {
     (void)sig;
     got_fatal_signal = 1;
+}
+
+/* ---------- Line Swapping Feature ---------- */
+static void swap_line_up(void) {
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
+        return;
+    }
+    if (current_line <= 0) return;
+
+    save_undo_state_batch(current_line - 1, 2);
+
+    char *tmp = lines[current_line];
+    lines[current_line] = lines[current_line - 1];
+    lines[current_line - 1] = tmp;
+
+    current_line--;
+    is_modified = 1;
+
+    int len = (int)strlen(lines[current_line]);
+    if (cursor_x > len) cursor_x = len;
+
+    if (current_line < scroll_y) scroll_y = current_line;
+}
+
+static void swap_line_down(void) {
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
+        return;
+    }
+    if (current_line >= line_count - 1) return;
+
+    save_undo_state_batch(current_line, 2);
+
+    char *tmp = lines[current_line];
+    lines[current_line] = lines[current_line + 1];
+    lines[current_line + 1] = tmp;
+
+    current_line++;
+    is_modified = 1;
+
+    int len = (int)strlen(lines[current_line]);
+    if (cursor_x > len) cursor_x = len;
+
+    int max_displayable_lines = LINES - 4;
+    if (current_line >= scroll_y + max_displayable_lines) {
+        scroll_y = current_line - max_displayable_lines + 1;
+    }
 }
 
 /* ---------- UTF-8 Helpers ---------- */
@@ -1151,12 +1199,10 @@ void show_about_window(void) {
     WINDOW *about_win = newwin(height, width, start_y, start_x);
     box(about_win, 0, 0);
 
-    // Apply header style matching the help window
     wattron(about_win, A_BOLD);
     mvwprintw(about_win, 0, (width - 10) / 2, " About qi ");
     wattroff(about_win, A_BOLD);
 
-    // Render content lines
     mvwprintw(about_win, 2, 4, "qi - A Lightweight Text Editor");
     mvwprintw(about_win, 3, 4, "Version %s", VERSION);
 
@@ -1172,16 +1218,15 @@ void show_about_window(void) {
 
     wrefresh(about_win);
 
-    // Modal event loop
     int ch;
     while ((ch = wgetch(about_win)) != -1) {
-        if (ch == 27 || ch == 'q' || ch == 'Q') { // 27 = ESC
+        if (ch == 27 || ch == 'q' || ch == 'Q') {
             break;
         }
     }
 
     delwin(about_win);
-    touchwin(stdscr); // Force main screen refresh
+    touchwin(stdscr);
     refresh();
 }
 
@@ -1209,6 +1254,8 @@ void show_help_window(void) {
         { "Ctrl+P",        "Paste line",                 0 },
         { "Ctrl+W",        "Delete word left",           0 },
         { "Ctrl+N",        "Duplicate line",             0 },
+        { "ALT/OPT+k",     "Swap line up",               0 },
+        { "ALT/OPT+j",     "Swap line down",             0 },
         { "Tab",           "Indent",                     0 },
         { "Shift+Tab",     "Dedent",                     0 },
         { "",              "",                            0 },
@@ -1578,6 +1625,22 @@ int main(int argc, char *argv[]) {
             nodelay(stdscr, TRUE);
             int next1 = getch();
 
+            if (next1 == ERR) {
+                nodelay(stdscr, FALSE);
+                continue;
+            }
+
+            /* Direct ESC + Up/Down key bindings (Mac Terminal / Meta Mode) */
+            if (next1 == 'k') {
+                nodelay(stdscr, FALSE);
+                swap_line_up();
+                continue;
+            } else if (next1 == 'j') {
+                nodelay(stdscr, FALSE);
+                swap_line_down();
+                continue;
+            }
+
             if (next1 == 'a' || next1 == 'A') {
                 nodelay(stdscr, FALSE);
                 show_about_window();
@@ -1601,24 +1664,43 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            int next2 = (next1 != ERR) ? getch() : ERR;
+            /* Extended CSI Escape Sequences parsing */
+            if (next1 == '[') {
+                int next2 = getch();
 
-            if (next1 == '[' && next2 == '2') {
-                char seq[16] = {0};
-                int idx = 0;
-                int c;
-                while ((c = getch()) != ERR && idx < 10) {
-                    seq[idx++] = c;
-                    if (c == '~') break;
-                }
-                if (strcmp(seq, "00~") == 0) {
-                    is_pasting = 1;
-                    nodelay(stdscr, FALSE);
-                    continue;
-                } else if (strcmp(seq, "01~") == 0) {
-                    is_pasting = 0;
-                    nodelay(stdscr, FALSE);
-                    continue;
+                if (next2 == '1') {
+                    int semicolon = getch();
+                    int modifier  = getch();
+                    int direction = getch();
+
+                    if (semicolon == ';' && (modifier == '3' || modifier == '9' || modifier == '5')) {
+                        if (direction == 'A') {
+                            nodelay(stdscr, FALSE);
+                            swap_line_up();
+                            continue;
+                        } else if (direction == 'B') {
+                            nodelay(stdscr, FALSE);
+                            swap_line_down();
+                            continue;
+                        }
+                    }
+                } else if (next2 == '2') {
+                    char seq[16] = {0};
+                    int idx = 0;
+                    int c;
+                    while ((c = getch()) != ERR && idx < 10) {
+                        seq[idx++] = c;
+                        if (c == '~') break;
+                    }
+                    if (strcmp(seq, "00~") == 0) {
+                        is_pasting = 1;
+                        nodelay(stdscr, FALSE);
+                        continue;
+                    } else if (strcmp(seq, "01~") == 0) {
+                        is_pasting = 0;
+                        nodelay(stdscr, FALSE);
+                        continue;
+                    }
                 }
             }
             nodelay(stdscr, FALSE);
@@ -1856,42 +1938,13 @@ int main(int argc, char *argv[]) {
             if (scroll_y < 0) scroll_y = 0;
             int len = strlen(lines[current_line]); if (cursor_x > len) cursor_x = len;
         }
-        else if (ch == KEY_HOME || ch == 1 || ch == 27) {
-            if (ch == KEY_HOME || ch == 1) {
-                cursor_x = 0;
-            } else {
-                int next1 = getch();
-                if (next1 == 'a' || next1 == 'A') {
-                    show_about_window();
-                    continue;
-                } else if (next1 == 'b') {
-                    if (cursor_x > 0) {
-                        while (cursor_x > 0 && isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
-                        while (cursor_x > 0 && !isspace((unsigned char)lines[current_line][cursor_x-1])) cursor_x--;
-                    }
-                    continue;
-                } else if (next1 == 'f') {
-                    int len = strlen(lines[current_line]);
-                    if (cursor_x < len) {
-                        while (cursor_x < len && !isspace((unsigned char)lines[current_line][cursor_x])) cursor_x++;
-                        while (cursor_x < len && isspace((unsigned char)lines[current_line][cursor_x])) cursor_x++;
-                    }
-                    continue;
-                }
-                int next2 = getch();
-                if (next1 == '[' && (next2 == '1' || next2 == 'H')) {
-                    if (next2 == '1') getch();
-                    cursor_x = 0;
-                } else if (next1 == '[' && (next2 == '4' || next2 == 'F')) {
-                    if (next2 == '4') getch();
-                    cursor_x = (int)strlen(lines[current_line]);
-                } else { ungetch(next2); ungetch(next1); }
-            }
+        else if (ch == KEY_HOME || ch == 1) {
+            cursor_x = 0;
         }
         else if (ch == KEY_END || ch == CTRL_KEY('e')) {
             cursor_x = (int)strlen(lines[current_line]);
         }
-        else if (ch == KEY_HOME || ch == CTRL_KEY('a')) {
+        else if (ch == CTRL_KEY('a')) {
             int first_nws = 0;
             while (first_nws < (int)strlen(lines[current_line]) &&
                    isspace((unsigned char)lines[current_line][first_nws]))
