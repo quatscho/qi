@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.40 (2026)
+ * Version: 1.1.41 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -29,7 +29,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.40"
+#define VERSION "1.1.41"
 
 /* Define keycode for ALT/OPT+S */
 #ifndef KEY_ALT_S
@@ -732,6 +732,7 @@ void draw_screen(void) {
     init_pair(5, COLOR_GREEN, COLOR_BLACK);
     init_pair(6, COLOR_YELLOW, COLOR_BLACK);
     init_pair(7, COLOR_BLACK, COLOR_YELLOW);
+    init_pair(8, COLOR_BLUE, COLOR_BLACK);
 
     update_bracket_match();
 
@@ -762,12 +763,12 @@ void draw_screen(void) {
 
         if (gutter_visible) {
             if (file_line_index == current_line) {
-                attron(COLOR_PAIR(1));
+                attron(COLOR_PAIR(5));
                 mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
-                attroff(COLOR_PAIR(1));
-                attron(COLOR_PAIR(1) | A_BOLD);
+                attroff(COLOR_PAIR(5));
+                attron(COLOR_PAIR(5) | A_BOLD);
                 mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
-                attroff(COLOR_PAIR(1) | A_BOLD);
+                attroff(COLOR_PAIR(5) | A_BOLD);
             } else {
                 mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
                 mvaddch(physical_row, gutter_digits + 1, ACS_VLINE);
@@ -1224,17 +1225,17 @@ void cut_lines_interactive(void) { process_line_ranges_interactive(1); }
 
 /* ---------- About Dialog ---------- */
 void show_about_window(void) {
-    int height = 14;
-    int width = 70;
+    int height = 15;
+    int width = 60;
     int start_y = (LINES - height) / 2;
     int start_x = (COLS - width) / 2;
 
     WINDOW *about_win = newwin(height, width, start_y, start_x);
     box(about_win, 0, 0);
 
-    wattron(about_win, A_BOLD);
+    wattron(about_win, COLOR_PAIR(1) | A_BOLD);
     mvwprintw(about_win, 0, (width - 10) / 2, " About qi ");
-    wattroff(about_win, A_BOLD);
+    wattroff(about_win, COLOR_PAIR(1) | A_BOLD);
 
     mvwprintw(about_win, 2, 4, "qi - A Lightweight Text Editor");
     mvwprintw(about_win, 3, 4, "Version %s", VERSION);
@@ -1246,17 +1247,16 @@ void show_about_window(void) {
     mvwprintw(about_win, 9, 4, "Repository: https://github.com/quatscho/qi");
 
     wattron(about_win, A_DIM);
-    mvwprintw(about_win, 11, (width - 29) / 2, "[ Press ESC or 'q' to close ]");
+    mvwprintw(about_win, 11, 4, "(c) 2026, Christopher Camacho");
     wattroff(about_win, A_DIM);
+
+    wattron(about_win, COLOR_PAIR(1));
+    mvwprintw(about_win, 13, (width - 29) / 2, "Press any key to close...");
+    wattroff(about_win, COLOR_PAIR(1));
 
     wrefresh(about_win);
 
-    int ch;
-    while ((ch = wgetch(about_win)) != -1) {
-        if (ch == 27 || ch == 'q' || ch == 'Q') {
-            break;
-        }
-    }
+    wgetch(about_win);
 
     delwin(about_win);
     touchwin(stdscr);
@@ -1325,7 +1325,7 @@ void show_help_window(void) {
 
         {
             char title[32];
-            snprintf(title, sizeof(title), " qi v%s ", VERSION);
+            snprintf(title, sizeof(title), " HELP ");
             int tlen = (int)strlen(title);
             int tx = (win_w - tlen) / 2;
             mvwaddch(hw, 0, tx - 1,    ACS_RTEE);
@@ -1355,15 +1355,16 @@ void show_help_window(void) {
         if (scroll > 0) mvwprintw(hw, 1, win_w - 4, " ^ ");
         if (scroll + inner_h < total) mvwprintw(hw, inner_h, win_w - 4, " v ");
 
-        for (int x = 1; x < win_w - 1; x++) mvwaddch(hw, win_h - 5, x, ACS_HLINE);
+        int footer_start = win_h - 4;
+        for (int x = 1; x < win_w - 1; x++) mvwaddch(hw, footer_start, x, ACS_HLINE);
         wattron(hw, A_DIM);
-        mvwprintw(hw, win_h - 4, 2, "Arrow keys to scroll");
+        mvwprintw(hw, footer_start + 1, 2, "Arrow keys to scroll");
         wattroff(hw, A_DIM);
         wattron(hw, COLOR_PAIR(1));
-        mvwprintw(hw, win_h - 3, 2, "Press any key to close...");
+        mvwprintw(hw, footer_start + 2, 2, "Press any key to close...");
         wattroff(hw, COLOR_PAIR(1));
 
-        {
+        /*{
             char copy[48];
             snprintf(copy, sizeof(copy), " (c) 2026 Christopher Camacho ");
             int clen = (int)strlen(copy);
@@ -1373,7 +1374,7 @@ void show_help_window(void) {
             wattron(hw, A_DIM);
             mvwprintw(hw, win_h - 1, cx, "%s", copy);
             wattroff(hw, A_DIM);
-        }
+        }*/
 
         wrefresh(hw);
 

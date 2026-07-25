@@ -118,13 +118,13 @@ void syntax_set_file(const char *filename) {
 
     /* Check for shell dotfiles / rc files */
     if (strcmp(base, ".zshrc") == 0 || strcmp(base, "zshrc") == 0 ||
-	strcmp(base, ".zshenv") == 0 || strcmp(base, "zshenv") == 0 ||
-	strcmp(base, ".zprofile") == 0 || strcmp(base, "zprofile") == 0 ||
-	strcmp(base, ".bashrc") == 0 || strcmp(base, "bashrc") == 0 ||
-	strcmp(base, ".bash_profile") == 0 || strcmp(base, "bash_profile") ==0 ||
-	strcmp(base, ".profile") == 0 || strcmp(base, "profile") == 0 ) {
-		current_lang = LANG_SHELL; return;
-    	}
+        strcmp(base, ".zshenv") == 0 || strcmp(base, "zshenv") == 0 ||
+        strcmp(base, ".zprofile") == 0 || strcmp(base, "zprofile") == 0 ||
+        strcmp(base, ".bashrc") == 0 || strcmp(base, "bashrc") == 0 ||
+        strcmp(base, ".bash_profile") == 0 || strcmp(base, "bash_profile") == 0 ||
+        strcmp(base, ".profile") == 0 || strcmp(base, "profile") == 0) {
+        current_lang = LANG_SHELL; return;
+    }
 
     const char *ext = strrchr(base, '.');
     if (!ext) return;
@@ -138,7 +138,7 @@ void syntax_set_file(const char *filename) {
         current_lang = LANG_PYTHON;
     else if (strcmp(ext,"sh")==0 || strcmp(ext,"bash")==0 ||
              strcmp(ext,"zsh")==0 || strcmp(ext,"ksh")==0 ||
-	     strcmp(ext,"zshrc")==0 || strcmp(ext,"bashrc")==0)
+             strcmp(ext,"zshrc")==0 || strcmp(ext,"bashrc")==0)
         current_lang = LANG_SHELL;
     else if (strcmp(ext,"md")==0 || strcmp(ext,"markdown")==0)
         current_lang = LANG_MARKDOWN;
@@ -155,10 +155,10 @@ void syntax_set_file(const char *filename) {
              strcmp(ext,"phtml")==0)
         current_lang = LANG_PHP;
     else if (strcmp(ext,"css")==0)
-            current_lang = LANG_CSS;
+        current_lang = LANG_CSS;
 }
 
-/* ---------- block-comment pre-scan (C only) ---------- */
+/* ---------- block-comment pre-scan (C, Markdown code blocks, PHP, CSS) ---------- */
 void syntax_scan(char **lines, int count) {
     /* Grow state array if needed */
     if (count > in_block_cap) {
@@ -169,7 +169,23 @@ void syntax_scan(char **lines, int count) {
         memset(in_block, 0, in_block_cap);
     }
 
-    if ((current_lang != LANG_C && current_lang != LANG_PHP && current_lang != LANG_CSS) || !in_block) return;
+    if (!in_block) return;
+
+    if (current_lang == LANG_MARKDOWN) {
+        int inside = 0;
+        for (int i = 0; i < count; i++) {
+            in_block[i] = (char)inside;
+            const char *p = lines[i];
+            /* Skip leading whitespace */
+            while (*p == ' ' || *p == '\t') p++;
+            if (strncmp(p, "```", 3) == 0) {
+                inside = !inside;
+            }
+        }
+        return;
+    }
+
+    if (current_lang != LANG_C && current_lang != LANG_PHP && current_lang != LANG_CSS) return;
 
     int inside = 0;
     for (int i = 0; i < count; i++) {
@@ -233,13 +249,85 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
     int len = (int)strlen(line);
     int n   = 0;
 
-    /* --- Markdown: very simple heading / code fence detection --- */
+    /* --- Markdown Syntax Highlighting --- */
     if (current_lang == LANG_MARKDOWN) {
-        if (len > 0 && line[0] == '#')
-            return add_span(spans, n, 0, len, TOK_PREPROC);
-        if (len >= 3 && strncmp(line,"```",3)==0)
+        int inside_block_md = (in_block && line_idx < in_block_cap) ? in_block[line_idx] : 0;
+        int j = 0;
+
+        /* Skip leading whitespace */
+        while (j < len && (line[j] == ' ' || line[j] == '\t')) j++;
+
+        /* Code Block Fence (```) or inside multiline code fence */
+        if (strncmp(line + j, "```", 3) == 0 || inside_block_md) {
             return add_span(spans, n, 0, len, TOK_COMMENT);
-        return 0;
+        }
+
+        /* Headings (# Header) */
+        if (line[j] == '#') {
+            int h = j;
+            while (h < len && line[h] == '#') h++;
+            if (h < len && line[h] == ' ') {
+                return add_span(spans, n, 0, len, TOK_PREPROC);
+            }
+        }
+
+        /* Blockquotes (>) or Unordered List items (- , * , + ) */
+        if (line[j] == '>' ||
+           ((line[j] == '-' || line[j] == '*' || line[j] == '+') && j + 1 < len && line[j + 1] == ' ')) {
+            n = add_span(spans, n, j, j + 1, TOK_PREPROC);
+            j++;
+        }
+
+        /* Inline formatting scan */
+        for (; j < len; j++) {
+            /* Inline Code (`code`) */
+            if (line[j] == '`') {
+                int s = j; j++;
+                while (j < len && line[j] != '`') j++;
+                if (j < len && line[j] == '`') j++;
+                n = add_span(spans, n, s, j, TOK_COMMENT);
+                j--; continue;
+            }
+
+            /* Bold / Italic (**bold**, __bold__, *italic*, _italic_) */
+            if ((line[j] == '*' || line[j] == '_')) {
+                char delim = line[j];
+                int count = (j + 1 < len && line[j + 1] == delim) ? 2 : 1;
+                int s = j;
+                j += count;
+                while (j < len) {
+                    if (line[j] == delim) {
+                        if (count == 2 && j + 1 < len && line[j + 1] == delim) {
+                            j += 2; break;
+                        } else if (count == 1) {
+                            j++; break;
+                        }
+                    }
+                    j++;
+                }
+                n = add_span(spans, n, s, j, TOK_KEYWORD);
+                j--; continue;
+            }
+
+            /* Links and Images ([text](url) or ![alt](url)) */
+            if (line[j] == '[' || (line[j] == '!' && j + 1 < len && line[j + 1] == '[')) {
+                int s = j;
+                if (line[j] == '!') j++;
+                if (line[j] == '[') {
+                    while (j < len && line[j] != ']') j++;
+                    if (j < len && line[j] == ']') {
+                        j++;
+                        if (j < len && line[j] == '(') {
+                            while (j < len && line[j] != ')') j++;
+                            if (j < len && line[j] == ')') j++;
+                            n = add_span(spans, n, s, j, TOK_STRING);
+                            j--; continue;
+                        }
+                    }
+                }
+            }
+        }
+        return n;
     }
 
     /* --- Makefile --- */
@@ -332,7 +420,7 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
         int in_str  = 0;
         char str_ch = 0;
         int j = 0;
-        /* skip leading whitespace — emit as normal */
+        /* skip leading whitespace  emit as normal */
         while (j < len && (line[j]==' '||line[j]=='\t')) j++;
 
         for (; j < len; j++) {
@@ -491,7 +579,7 @@ int syntax_spans(int line_idx, const char *line, Span *spans) {
     int in_str  = 0;
     int in_chr  = 0;
 
-    /* leading whitespace — always normal */
+    /* leading whitespace  always normal */
     int j = 0;
     while (j < len && (line[j]==' '||line[j]=='\t')) j++;
 
