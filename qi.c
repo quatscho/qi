@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.41 (2026)
+ * Version: 1.1.42 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -29,7 +29,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.41"
+#define VERSION "1.1.42"
 
 /* Define keycode for ALT/OPT+S */
 #ifndef KEY_ALT_S
@@ -763,12 +763,24 @@ void draw_screen(void) {
 
         if (gutter_visible) {
             if (file_line_index == current_line) {
-                attron(COLOR_PAIR(5));
-                mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
-                attroff(COLOR_PAIR(5));
-                attron(COLOR_PAIR(5) | A_BOLD);
-                mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
-                attroff(COLOR_PAIR(5) | A_BOLD);
+
+                if (!read_only_mode) {
+                    attron(COLOR_PAIR(5));
+                    mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+                    attroff(COLOR_PAIR(5));
+                    attron(COLOR_PAIR(5) | A_BOLD);
+                    mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
+                    attroff(COLOR_PAIR(5) | A_BOLD);
+                }
+
+                if (read_only_mode) {
+                   attron(COLOR_PAIR(2));
+                    mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+                    attroff(COLOR_PAIR(2));
+                    attron(COLOR_PAIR(2) | A_BOLD);
+                    mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
+                    attroff(COLOR_PAIR(2) | A_BOLD);
+                }
             } else {
                 mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
                 mvaddch(physical_row, gutter_digits + 1, ACS_VLINE);
@@ -872,17 +884,44 @@ void draw_screen(void) {
         int tw_s = COLS - 1 - (gd_s + 3);
         int vis_col = (tw_s > 0) ? (cursor_x % tw_s) + 1 : cursor_x + 1;
         if (!is_modified) {
-            mvprintw(LINES - 1, 0,
-                "qi v%s %s |  Ln: %d  Col: %d  |  ^? for Help",
-                VERSION, read_only_mode ? "[RO]" : "", current_line + 1, vis_col);
+            move(LINES - 1, 0);
+            clrtoeol();
+
+            if (read_only_mode) {
+                attron(COLOR_PAIR(2) | A_BOLD);
+                printw("[RO Mode]  ");
+                attroff(COLOR_PAIR(2) | A_BOLD);
+             }
+
+            if (!read_only_mode) {
+                attron(COLOR_PAIR(5) | A_BOLD);
+                printw("[RW Mode]  ");
+                attroff(COLOR_PAIR(5) | A_BOLD);
+            }
+
+            printw("Ln: %d Col: %d | (Ctrl+? for Help)", current_line + 1, vis_col);
         } else {
             int total_chars = 0, modified_lines = 0;
             for (int i = 0; i < line_count; i++) {
                 total_chars += (int)strlen(lines[i]);
                 if (tracker_is_modified(i, 0)) modified_lines++;
             }
-            mvprintw(LINES - 1, 0,
-                "Lines Mod: %d | Total Chars: %d | Ln: %d Col: %d | (^? for Help)",
+            move(LINES - 1, 0);
+            clrtoeol();
+
+            if (read_only_mode) {
+                attron(COLOR_PAIR(2) | A_BOLD);
+                printw("[RO Mode]  ");
+                attroff(COLOR_PAIR(2) | A_BOLD);
+             }
+
+            if (!read_only_mode) {
+                attron(COLOR_PAIR(5) | A_BOLD);
+                printw("[RW Mode]  ");
+                attroff(COLOR_PAIR(5) | A_BOLD);
+            }
+
+             printw("Lines Mod: %d | Total Chars: %d | Ln: %d Col: %d | (Ctrl+? for Help)",
                 modified_lines, total_chars, current_line + 1, vis_col);
         }
     }
