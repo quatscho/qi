@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.39 (2026)
+ * Version: 1.1.40 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -29,7 +29,12 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.39"
+#define VERSION "1.1.40"
+
+/* Define keycode for ALT/OPT+S */
+#ifndef KEY_ALT_S
+#define KEY_ALT_S 0x1fe
+#endif
 
 #ifndef BUTTON5_PRESSED
 #define BUTTON5_PRESSED BUTTON2_PRESSED
@@ -101,6 +106,8 @@ void undo(void);
 void redo_op(void);
 void draw_screen(void);
 void show_about_window(void);
+void save_file(void);
+void save_as_file(void);
 
 /* ---------- Signal Handler ---------- */
 static void fatal_signal_handler(int sig) {
@@ -571,10 +578,8 @@ void save_file(void) {
         return;
     }
     if (strcmp(current_filename, "untitled.txt") == 0) {
-        char filename[256];
-        if (!prompt_input("Enter filename to save: ", filename, sizeof(filename), 0)) return;
-        strncpy(current_filename, filename, sizeof(current_filename) - 1);
-        current_filename[sizeof(current_filename) - 1] = '\0';
+        save_as_file();
+        return;
     }
 
     /* ---------- Backup Logic (-b / --backup) ---------- */
@@ -629,6 +634,34 @@ void save_file(void) {
         mvprintw(LINES - 1, 0, "Error: Could not save file! Press any key...");
         clrtoeol(); refresh(); getch();
     }
+}
+
+void save_as_file(void) {
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot save.");
+        return;
+    }
+
+    char new_filename[256];
+    if (!prompt_input("Save As: ", new_filename, sizeof(new_filename), 0)) {
+        snprintf(status_msg, sizeof(status_msg), "Save As cancelled.");
+        return;
+    }
+
+    /* Clean old swap file if saving over previous file path */
+    if (strcmp(current_filename, "untitled.txt") != 0) {
+        char old_swp[300];
+        snprintf(old_swp, sizeof(old_swp), ".%s.swp", current_filename);
+        unlink(old_swp);
+    }
+
+    strncpy(current_filename, new_filename, sizeof(current_filename) - 1);
+    current_filename[sizeof(current_filename) - 1] = '\0';
+
+    syntax_set_file(current_filename);
+    syntax_scan(lines, line_count);
+
+    save_file();
 }
 
 void auto_save(void) {
@@ -1236,6 +1269,7 @@ void show_help_window(void) {
     static const struct HelpEntry entries[] = {
         { "FILE",          NULL,                         1 },
         { "Ctrl+S",        "Save file",                  0 },
+        { "ALT/OPT+S",     "Save As",                    0 },
         { "Ctrl+O",        "Open file",                  0 },
         { "Ctrl+Q",        "Quit",                       0 },
         { "",              "",                            0 },
@@ -1577,6 +1611,9 @@ int main(int argc, char *argv[]) {
     noecho();
     keypad(stdscr, TRUE);
 
+    /* Bind terminal escape sequence for ALT/OPT+S */
+    define_key("\033s", KEY_ALT_S);
+
     printf("\033[?2004h");
     fflush(stdout);
 
@@ -1644,6 +1681,12 @@ int main(int argc, char *argv[]) {
             if (next1 == 'a' || next1 == 'A') {
                 nodelay(stdscr, FALSE);
                 show_about_window();
+                continue;
+            }
+
+            if (next1 == 's' || next1 == 'S') {
+                nodelay(stdscr, FALSE);
+                save_as_file();
                 continue;
             }
 
@@ -1758,6 +1801,7 @@ int main(int argc, char *argv[]) {
         }
         else if (ch == CTRL_KEY('o')) interactive_open();
         else if (ch == CTRL_KEY('s')) save_file();
+        else if (ch == KEY_ALT_S) save_as_file();
         else if (ch == CTRL_KEY('w')) {
             if (read_only_mode) {
                 snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
