@@ -3,7 +3,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O2
 LIBS = -lncurses
 TARGET = qi
-SRCS = qi.c tracker.c syntax.c
+SRCS = qi.c tracker.c syntax.c color.c
 INSTALL_DIR = /usr/local/bin
 
 # Detect Operating System

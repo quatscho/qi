@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.43 (2026)
+ * Version: 1.1.44 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -24,12 +24,13 @@
 #include <wchar.h>
 #include "tracker.h"
 #include "syntax.h"
+#include "color.h"
 
 #define MAX_LINE_LEN 512
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.43"
+#define VERSION "1.1.44"
 
 /* Define keycode for ALT/OPT+S */
 #ifndef KEY_ALT_S
@@ -596,9 +597,9 @@ void save_file(void) {
             if (stat(bak_filename, &bak_st) == 0) {
                 move(LINES - 1, 0);
                 clrtoeol();
-                attron(COLOR_PAIR(2) | A_BOLD);
+                attron(COLOR_PAIR(PAIR_RED) | A_BOLD);
                 printw("Backup file '%s.bak' already exists. Overwrite backup? (y/n): ", current_filename);
-                attroff(COLOR_PAIR(2) | A_BOLD);
+                attroff(COLOR_PAIR(PAIR_RED) | A_BOLD);
                 refresh();
 
                 int confirm = getch();
@@ -742,27 +743,17 @@ static void update_bracket_match(void) {
 
 /* ---------- Screen Rendering ---------- */
 void draw_screen(void) {
-    start_color();
-    init_pair(1, COLOR_YELLOW, COLOR_BLACK);
-    init_pair(2, COLOR_RED, COLOR_BLACK);
-    init_pair(3, COLOR_CYAN, COLOR_BLACK);
-    init_pair(4, COLOR_MAGENTA, COLOR_BLACK);
-    init_pair(5, COLOR_GREEN, COLOR_BLACK);
-    init_pair(6, COLOR_YELLOW, COLOR_BLACK);
-    init_pair(7, COLOR_BLACK, COLOR_YELLOW);
-    init_pair(8, COLOR_BLUE, COLOR_BLACK);
-
     update_bracket_match();
 
     move(0, 0); clrtoeol();
-    attron(COLOR_PAIR(1));
+    attron(COLOR_PAIR(PAIR_YELLOW));
     if (read_only_mode)
         printw(" File: %s [Read-Only] (%d lines)", current_filename, line_count);
     else if (is_modified)
         printw(" File: %s * (unsaved) (%d lines)", current_filename, line_count);
     else
         printw(" File: %s (%d lines)", current_filename, line_count);
-    attroff(COLOR_PAIR(1));
+    attroff(COLOR_PAIR(PAIR_YELLOW));
 
     move(1, 0); clrtoeol();
     for (int x = 0; x < COLS; x++) mvaddch(1, x, ACS_HLINE);
@@ -782,32 +773,30 @@ void draw_screen(void) {
         if (gutter_visible) {
             if (file_line_index == current_line) {
 
-                if (!read_only_mode) {
-                    attron(COLOR_PAIR(5));
+                  /* Priority: Read-Only (Red), Overwrite (Yellow), Insert (Green) */
+                  if (read_only_mode) {
+                    attron(COLOR_PAIR(PAIR_RED));
                     mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
-                    attroff(COLOR_PAIR(5));
-                    attron(COLOR_PAIR(5) | A_BOLD);
+                    attroff(COLOR_PAIR(PAIR_RED));
+                    attron(COLOR_PAIR(PAIR_RED) | A_BOLD);
                     mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
-                    attroff(COLOR_PAIR(5) | A_BOLD);
+                    attroff(COLOR_PAIR(PAIR_RED) | A_BOLD);
+                } else if (overwrite_mode) {
+                    attron(COLOR_PAIR(PAIR_YELLOW));
+                    mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+                    attroff(COLOR_PAIR(PAIR_YELLOW));
+                    attron(COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+                    mvaddch(physical_row, gutter_digits +1, ACS_DIAMOND);
+                    attroff(COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+                } else {
+                    attron(COLOR_PAIR(PAIR_GREEN));
+                    mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+                    attroff(COLOR_PAIR(PAIR_GREEN));
+                    attron(COLOR_PAIR(PAIR_GREEN) | A_BOLD);
+                    mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
+                    attroff(COLOR_PAIR(PAIR_GREEN) | A_BOLD);
                 }
 
-                if (read_only_mode) {
-                   attron(COLOR_PAIR(2));
-                   mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
-                   attroff(COLOR_PAIR(2));
-                   attron(COLOR_PAIR(2) | A_BOLD);
-                   mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
-                   attroff(COLOR_PAIR(2) | A_BOLD);
-                }
-
-                if (overwrite_mode) {
-                   attron(COLOR_PAIR(1));
-                   mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
-                   attroff(COLOR_PAIR(1));
-                   attron(COLOR_PAIR(1) | A_BOLD);
-                   mvaddch(physical_row, gutter_digits +1, ACS_DIAMOND);
-                   attroff(COLOR_PAIR(1) | A_BOLD);
-                }
             } else {
                 mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
                 mvaddch(physical_row, gutter_digits + 1, ACS_VLINE);
@@ -857,9 +846,9 @@ void draw_screen(void) {
             int is_bracket_match  = (file_line_index == match_line && j == match_col);
 
             if (is_bracket_cursor || is_bracket_match) {
-                attron(COLOR_PAIR(7) | A_BOLD);
+                attron(COLOR_PAIR(PAIR_MATCH) | A_BOLD);
                 for (int b = 0; b < clen; b++) printw("%c", line[j + b]);
-                attroff(COLOR_PAIR(7) | A_BOLD);
+                attroff(COLOR_PAIR(PAIR_MATCH) | A_BOLD);
                 current_phys_col += cw;
                 j += clen;
                 continue;
@@ -871,9 +860,15 @@ void draw_screen(void) {
             if (span_idx < nspans && j >= spans[span_idx].start && j < spans[span_idx].end)
                 pair = tok_pair[spans[span_idx].type];
 
+            int is_current = (file_line_index == current_line);
+
+            if (is_current) attron(A_BOLD);
             if (pair) attron(COLOR_PAIR(pair));
+
             for (int b = 0; b < clen; b++) printw("%c", line[j + b]);
+
             if (pair) attroff(COLOR_PAIR(pair));
+            if (is_current) attroff(A_BOLD);
 
             current_phys_col += cw;
             j += clen;
@@ -903,9 +898,9 @@ void draw_screen(void) {
     move(LINES - 1, 0); clrtoeol();
 
     if (strlen(status_msg) > 0) {
-        attron(COLOR_PAIR(1));
+        attron(COLOR_PAIR(PAIR_YELLOW));
         mvprintw(LINES - 1, 0, "%.*s", COLS - 1, status_msg);
-        attroff(COLOR_PAIR(1));
+        attroff(COLOR_PAIR(PAIR_YELLOW));
     } else {
         int gd_s = 1; { int tmp = line_count; while (tmp >= 10) { tmp /= 10; gd_s++; } }
         int tw_s = COLS - 1 - (gd_s + 3);
@@ -914,18 +909,19 @@ void draw_screen(void) {
         move(LINES -1, 0);
         clrtoeol();
 
+        /* Matches the priority in the gutter rendering block above */
         if (read_only_mode) {
-            attron(COLOR_PAIR(2) | A_BOLD);
+            attron(COLOR_PAIR(PAIR_RED) | A_BOLD);
             printw("[RO Mode]  ");
-            attroff(COLOR_PAIR(2) | A_BOLD);
+            attroff(COLOR_PAIR(PAIR_RED) | A_BOLD);
         } else if (overwrite_mode) {
-            attron(COLOR_PAIR(1) | A_BOLD);
+            attron(COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
             printw("[OW Mode]  ");
-            attroff(COLOR_PAIR(1) | A_BOLD);
+            attroff(COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
         } else {
-            attron(COLOR_PAIR(5) | A_BOLD);
+            attron(COLOR_PAIR(PAIR_GREEN) | A_BOLD);
             printw("[RW Mode]  ");
-            attroff(COLOR_PAIR(5) | A_BOLD);
+            attroff(COLOR_PAIR(PAIR_GREEN) | A_BOLD);
         }
 
         if (!is_modified) {
@@ -1287,9 +1283,9 @@ void show_about_window(void) {
     WINDOW *about_win = newwin(height, width, start_y, start_x);
     box(about_win, 0, 0);
 
-    wattron(about_win, COLOR_PAIR(1) | A_BOLD);
+    wattron(about_win, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
     mvwprintw(about_win, 0, (width - 10) / 2, " About qi ");
-    wattroff(about_win, COLOR_PAIR(1) | A_BOLD);
+    wattroff(about_win, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
 
     mvwprintw(about_win, 2, 4, "qi - A Lightweight Text Editor");
     mvwprintw(about_win, 3, 4, "Version %s", VERSION);
@@ -1304,9 +1300,9 @@ void show_about_window(void) {
     mvwprintw(about_win, 11, 4, "(c) 2026, Christopher Camacho");
     wattroff(about_win, A_DIM);
 
-    wattron(about_win, COLOR_PAIR(1));
+    wattron(about_win, COLOR_PAIR(PAIR_YELLOW));
     mvwprintw(about_win, 13, (width - 29) / 2, "Press any key to close...");
-    wattroff(about_win, COLOR_PAIR(1));
+    wattroff(about_win, COLOR_PAIR(PAIR_YELLOW));
 
     wrefresh(about_win);
 
@@ -1358,7 +1354,7 @@ void show_help_window(void) {
         { "F3",            "Toggle Read-Only Mode",      0 },
         { "F4",            "Toggle gutter / col-81",     0 },
         { "F5",            "Toggle syntax highlight",    0 },
-        { "Ctrl+X",        "Toggle Insert/Overwrite",    0 },
+        { "Ctrl+X",        "Toggle Overwrite Mode",      0 },
         { "Ctrl+?",        "This help screen",           0 },
         { "Alt/Opt+A",     "Show About dialog",          0 },
     };
@@ -1384,9 +1380,9 @@ void show_help_window(void) {
             int tx = (win_w - tlen) / 2;
             mvwaddch(hw, 0, tx - 1,    ACS_RTEE);
             mvwaddch(hw, 0, tx + tlen, ACS_LTEE);
-            wattron(hw, COLOR_PAIR(1) | A_BOLD);
+            wattron(hw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
             mvwprintw(hw, 0, tx, "%s", title);
-            wattroff(hw, COLOR_PAIR(1) | A_BOLD);
+            wattroff(hw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
         }
 
         int row = 1;
@@ -1414,9 +1410,9 @@ void show_help_window(void) {
         wattron(hw, A_DIM);
         mvwprintw(hw, footer_start + 1, 2, "Arrow keys to scroll");
         wattroff(hw, A_DIM);
-        wattron(hw, COLOR_PAIR(1));
+        wattron(hw, COLOR_PAIR(PAIR_YELLOW));
         mvwprintw(hw, footer_start + 2, 2, "Press any key to close...");
-        wattroff(hw, COLOR_PAIR(1));
+        wattroff(hw, COLOR_PAIR(PAIR_YELLOW));
 
         /*{
             char copy[48];
@@ -1661,6 +1657,7 @@ int main(int argc, char *argv[]) {
     printf("\e[?2004l"); fflush(stdout);
 
     initscr();
+    colors_init();
     set_escdelay(25);
     raw();
     noecho();
@@ -1829,9 +1826,9 @@ int main(int argc, char *argv[]) {
             if (stat(current_filename, &st) == 0 && st.st_mtime != file_mtime) {
                 file_mtime = st.st_mtime;
                 move(LINES - 1, 0); clrtoeol();
-                attron(COLOR_PAIR(2));
+                attron(COLOR_PAIR(PAIR_RED));
                 printw("File changed on disk! Reload? (y/n): ");
-                attroff(COLOR_PAIR(2));
+                attroff(COLOR_PAIR(PAIR_RED));
                 refresh();
                 int ans = getch();
                 if (ans == 'y' || ans == 'Y') {
@@ -1845,9 +1842,9 @@ int main(int argc, char *argv[]) {
         if (ch == CTRL_KEY('q')) {
             if (is_modified) {
                 move(LINES-1,0); clrtoeol();
-                attron(COLOR_PAIR(2));
+                attron(COLOR_PAIR(PAIR_RED));
                 printw("Unsaved changes! Quit anyway? (y/n): ");
-                attroff(COLOR_PAIR(2));
+                attroff(COLOR_PAIR(PAIR_RED));
                 refresh();
                 int confirm = getch();
                 if (confirm == 'y' || confirm == 'Y') break;
