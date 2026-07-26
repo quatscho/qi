@@ -347,3 +347,21 @@
 -e ## v1.1.38
 - Commit `ad8bab2`: 1.1.38: added new command line flags
 
+-e ## v1.1.39
+- Commit `415ff29`: 1.1.39: Add Alt/Opt+j/k to move lines up or down
+
+-e ## v1.1.40
+- Commit `4b4e47c`: 1.1.40: add Alt/Opt+S to perform Save As
+
+-e ## v1.1.41
+- Commit `12e2307`: 1.1.41: updated syntax.c to display markdown files properly. Various minor interface tweaks
+
+-e ## v1.1.42
+- Commit `60a44f3`: 1.1.42: added visual RO/RW mode indications
+
+-e ## v1.1.43
+- Commit `c13daac`: 1.1.43: the --backup flag now checks for an existing .bak file. Enable visuals for Overwrite Mode
+
+-e ## v1.1.44
+- Commit `74b7302`: 1.1.44: moved color pair definitions into color.h/.c
+
