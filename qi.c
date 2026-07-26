@@ -1413,8 +1413,8 @@ void show_help_window(void) {
         { "",              "",                            0 },
         { "EDITING",       NULL,                         1 },
         { "Ctrl+D",        "Delete line(s)",             0 },
+        { "Ctrl+C",        "Copy line(s)",               0 },
         { "Ctrl+Shift+K",  "Cut line",                   0 },
-        { "Ctrl+Shift+C",  "Copy line(s)",               0 },
         { "Ctrl+P",        "Paste line",                 0 },
         { "Ctrl+W",        "Delete word left",           0 },
         { "Ctrl+N",        "Duplicate line",             0 },
@@ -1997,7 +1997,7 @@ int main(int argc, char *argv[]) {
         else if (ch == CTRL_KEY('k') || ch == CTRL_KEY('K') || ch == 11) {
             cut_lines_interactive();
         }
-        else if (ch == CTRL_KEY('c') || ch == CTRL_KEY('K') || ch == 11) {
+        else if (ch == CTRL_KEY('c') || ch == CTRL_KEY('C') || ch == 11) {
             copy_lines_interactive();
         }
         else if (ch == CTRL_KEY('p')) {
