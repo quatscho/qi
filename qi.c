@@ -1414,7 +1414,7 @@ void show_help_window(void) {
         { "EDITING",       NULL,                         1 },
         { "Ctrl+D",        "Delete line(s)",             0 },
         { "Ctrl+C",        "Copy line(s)",               0 },
-        { "Ctrl+Shift+K",  "Cut line",                   0 },
+        { "Ctrl+Shift+K",  "Cut line(s)",                0 },
         { "Ctrl+P",        "Paste line",                 0 },
         { "Ctrl+W",        "Delete word left",           0 },
         { "Ctrl+N",        "Duplicate line",             0 },
