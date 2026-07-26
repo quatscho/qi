@@ -10,11 +10,19 @@ INSTALL_DIR = /usr/local/bin
 UNAME_S := $(shell uname -s)
 
 # --- AUTOMATIC HOMEBREW PATH DISCOVERY ---
-# If 'brew' is available, append its include and library directories dynamically
+# Prefer the ncurses-specific Homebrew prefix so we get the full ncurses headers
+# (including BUTTON5_PRESSED) rather than the stripped macOS system headers.
+# Falls back to the general Homebrew prefix if ncurses is not separately installed.
 ifeq ($(shell which brew > /dev/null 2>&1 && echo yes),yes)
-    BREW_PREFIX = $(shell brew --prefix)
-    CFLAGS += -I$(BREW_PREFIX)/include
-    LDFLAGS += -L$(BREW_PREFIX)/lib
+    BREW_NCURSES := $(shell brew --prefix ncurses 2>/dev/null)
+    ifneq ($(BREW_NCURSES),)
+        CFLAGS  += -I$(BREW_NCURSES)/include
+        LDFLAGS += -L$(BREW_NCURSES)/lib
+    else
+        BREW_PREFIX = $(shell brew --prefix)
+        CFLAGS  += -I$(BREW_PREFIX)/include
+        LDFLAGS += -L$(BREW_PREFIX)/lib
+    endif
 endif
 
 # Default target to compile the executable

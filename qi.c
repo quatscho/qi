@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.45 (2026)
+ * Version: 1.1.51 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -30,16 +30,24 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.45"
+#define VERSION "1.1.51"
 
 /* Define keycode for ALT/OPT+S */
 #ifndef KEY_ALT_S
 #define KEY_ALT_S 0x1fe
 #endif
 
+/* BUTTON5_PRESSED is absent from macOS system ncurses 5.7; fall back to
+ * BUTTON2_PRESSED so the symbol is always defined. The real registration
+ * is handled by ALL_MOUSE_EVENTS in mousemask(). */
 #ifndef BUTTON5_PRESSED
 #define BUTTON5_PRESSED BUTTON2_PRESSED
 #endif
+
+/* Both macOS (Homebrew ncurses) and Linux follow the xterm standard:
+ * BUTTON4 = scroll up, BUTTON5 = scroll down. */
+#define SCROLL_UP_BTN   BUTTON4_PRESSED
+#define SCROLL_DOWN_BTN BUTTON5_PRESSED
 
 /* ---------- Undo/Redo Data Structures ---------- */
 typedef enum {
@@ -1525,11 +1533,13 @@ static void handle_mouse_event(void) {
     MEVENT me;
     if (getmouse(&me) == OK) {
         int scroll_speed = 3;
-        if (me.bstate & BUTTON4_PRESSED) {
+        if (me.bstate & SCROLL_UP_BTN) {
+            /* Scroll up */
             scroll_y -= scroll_speed;
             if (scroll_y < 0) scroll_y = 0;
             if (current_line < scroll_y) current_line = scroll_y;
-        } else if (me.bstate & BUTTON5_PRESSED) {
+        } else if (me.bstate & SCROLL_DOWN_BTN) {
+            /* Scroll down */
             int mdl = LINES - 4;
             scroll_y += scroll_speed;
             if (scroll_y > line_count - 1) scroll_y = line_count - 1;
@@ -1752,7 +1762,10 @@ int main(int argc, char *argv[]) {
     start_color();
     init_pair(1, COLOR_YELLOW, COLOR_BLACK);
     curs_set(1);
-    mousemask(BUTTON1_PRESSED | BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
+    /* ALL_MOUSE_EVENTS ensures button 5 (scroll down) is registered even
+     * on macOS system ncurses where BUTTON5_PRESSED may not be natively
+     * defined and the terminal sends scroll-down as a separate button. */
+    mousemask(ALL_MOUSE_EVENTS, NULL);
 
     signal(SIGTERM, fatal_signal_handler);
     signal(SIGHUP,  fatal_signal_handler);
