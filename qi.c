@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.42 (2026)
+ * Version: 1.1.43 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -29,7 +29,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.42"
+#define VERSION "1.1.43"
 
 /* Define keycode for ALT/OPT+S */
 #ifndef KEY_ALT_S
@@ -590,6 +590,24 @@ void save_file(void) {
             char bak_filename[300];
             snprintf(bak_filename, sizeof(bak_filename), "%s.bak", current_filename);
 
+            struct stat bak_st;
+
+            /* Check if .bak file already exists */
+            if (stat(bak_filename, &bak_st) == 0) {
+                move(LINES - 1, 0);
+                clrtoeol();
+                attron(COLOR_PAIR(2) | A_BOLD);
+                printw("Backup file '%s.bak' already exists. Overwrite backup? (y/n): ", current_filename);
+                attroff(COLOR_PAIR(2) | A_BOLD);
+                refresh();
+
+                int confirm = getch();
+                if (confirm != 'y' && confirm != 'Y') {
+                    snprintf(status_msg, sizeof(status_msg), "Save cancelled (backup overwrite declined).");
+                    return;
+                }
+            }
+
             FILE *src = fopen(current_filename, "rb");
             if (src) {
                 FILE *dst = fopen(bak_filename, "wb");
@@ -775,11 +793,20 @@ void draw_screen(void) {
 
                 if (read_only_mode) {
                    attron(COLOR_PAIR(2));
-                    mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
-                    attroff(COLOR_PAIR(2));
-                    attron(COLOR_PAIR(2) | A_BOLD);
-                    mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
-                    attroff(COLOR_PAIR(2) | A_BOLD);
+                   mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+                   attroff(COLOR_PAIR(2));
+                   attron(COLOR_PAIR(2) | A_BOLD);
+                   mvaddch(physical_row, gutter_digits + 1, ACS_DIAMOND);
+                   attroff(COLOR_PAIR(2) | A_BOLD);
+                }
+
+                if (overwrite_mode) {
+                   attron(COLOR_PAIR(1));
+                   mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
+                   attroff(COLOR_PAIR(1));
+                   attron(COLOR_PAIR(1) | A_BOLD);
+                   mvaddch(physical_row, gutter_digits +1, ACS_DIAMOND);
+                   attroff(COLOR_PAIR(1) | A_BOLD);
                 }
             } else {
                 mvprintw(physical_row, 0, "%*d ", gutter_digits, file_line_index + 1);
@@ -891,6 +918,10 @@ void draw_screen(void) {
             attron(COLOR_PAIR(2) | A_BOLD);
             printw("[RO Mode]  ");
             attroff(COLOR_PAIR(2) | A_BOLD);
+        } else if (overwrite_mode) {
+            attron(COLOR_PAIR(1) | A_BOLD);
+            printw("[OW Mode]  ");
+            attroff(COLOR_PAIR(1) | A_BOLD);
         } else {
             attron(COLOR_PAIR(5) | A_BOLD);
             printw("[RW Mode]  ");
