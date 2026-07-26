@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.44 (2026)
+ * Version: 1.1.45 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -30,7 +30,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.44"
+#define VERSION "1.1.45"
 
 /* Define keycode for ALT/OPT+S */
 #ifndef KEY_ALT_S
@@ -1270,6 +1270,85 @@ static void process_line_ranges_interactive(int is_cut_mode) {
     }
 }
 
+void copy_lines_interactive(void) {
+    char input[256];
+    if (!prompt_input("Copy lines (e.g., 3, 5, 10-25 or !20-25): ", input, sizeof(input), 0)) return;
+
+    char saved_input_copy[256];
+    strncpy(saved_input_copy, input, sizeof(saved_input_copy) - 1);
+    saved_input_copy[sizeof(saved_input_copy) - 1] = '\0';
+
+    char *to_process = calloc(line_count, sizeof(char));
+    if (!to_process) return;
+
+    char *p = input;
+    while (*p == ' ' || *p == '\t') p++;
+
+    int invert = 0;
+    if (*p == '!') {
+        invert = 1;
+        p++;
+    }
+
+    char *token = strtok(p, ",");
+    while (token != NULL) {
+        while (*token == ' ' || *token == '\t') token++;
+        int start = 0, end = 0;
+        if (sscanf(token, "%d-%d", &start, &end) == 2) {
+            if (start > 0 && end >= start)
+                for (int i = start; i <= end && i <= line_count; i++) to_process[i - 1] = 1;
+        } else if (sscanf(token, "%d", &start) == 1) {
+            if (start > 0 && start <= line_count) to_process[start - 1] = 1;
+        }
+        token = strtok(NULL, ",");
+    }
+
+    if (invert) {
+        for (int i = 0; i < line_count; i++) {
+            to_process[i] = !to_process[i];
+        }
+    }
+
+    free(clipboard_line);
+    clipboard_line = NULL;
+
+    size_t total_bytes = 0;
+    int copied_count = 0;
+    for (int i = 0; i < line_count; i++) {
+        if (to_process[i]) {
+            total_bytes += strlen(lines[i]) + 1;
+            copied_count++;
+        }
+    }
+
+    if (total_bytes > 0) {
+        clipboard_line = malloc(total_bytes + 1);
+        if (clipboard_line) {
+            clipboard_line[0] = '\0';
+            char *dst = clipboard_line;
+            for (int i = 0; i < line_count; i++) {
+                if (to_process[i]) {
+                    size_t len = strlen(lines[i]);
+                    memcpy(dst, lines[i], len);
+                    dst += len;
+                    *dst++ = '\n';
+                }
+            }
+            *dst = '\0';
+        }
+    } else {
+        clipboard_line = xstrdup("");
+    }
+    free(to_process);
+
+    if (copied_count > 0) {
+        snprintf(status_msg, sizeof(status_msg), "Copied lines %s (%d line%s)",
+                 saved_input_copy, copied_count, copied_count > 1 ? "s" : "");
+    } else {
+        snprintf(status_msg, sizeof(status_msg), "No lines copied.");
+    }
+}
+
 void delete_lines_interactive(void) { process_line_ranges_interactive(0); }
 void cut_lines_interactive(void) { process_line_ranges_interactive(1); }
 
@@ -1335,6 +1414,7 @@ void show_help_window(void) {
         { "EDITING",       NULL,                         1 },
         { "Ctrl+D",        "Delete line(s)",             0 },
         { "Ctrl+Shift+K",  "Cut line",                   0 },
+        { "Ctrl+Shift+C",  "Copy line(s)",               0 },
         { "Ctrl+P",        "Paste line",                 0 },
         { "Ctrl+W",        "Delete word left",           0 },
         { "Ctrl+N",        "Duplicate line",             0 },
@@ -1916,6 +1996,9 @@ int main(int argc, char *argv[]) {
         }
         else if (ch == CTRL_KEY('k') || ch == CTRL_KEY('K') || ch == 11) {
             cut_lines_interactive();
+        }
+        else if (ch == CTRL_KEY('c') || ch == CTRL_KEY('K') || ch == 11) {
+            copy_lines_interactive();
         }
         else if (ch == CTRL_KEY('p')) {
             if (read_only_mode) {
