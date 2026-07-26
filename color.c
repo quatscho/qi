@@ -14,4 +14,5 @@ void colors_init(void) {
     init_pair(PAIR_YELLOW_ALT, COLOR_YELLOW,  COLOR_BLACK);
     init_pair(PAIR_MATCH,      COLOR_BLACK,   COLOR_YELLOW);
     init_pair(PAIR_BLUE,       COLOR_BLUE,    COLOR_BLACK);
+    init_pair(PAIR_SELECT,     COLOR_BLACK,   COLOR_WHITE);
 }

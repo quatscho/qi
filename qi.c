@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.51 (2026)
+ * Version: 1.1.53 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -30,7 +30,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.51"
+#define VERSION "1.1.53"
 
 /* Define keycode for ALT/OPT+S */
 #ifndef KEY_ALT_S
@@ -100,6 +100,14 @@ int match_col  = -1;
 static char *clipboard_line = NULL;
 static int syntax_highlight_enabled = 1;
 static int gutter_visible = 1;
+
+/* ---------- Mouse Selection State ---------- */
+/* Byte-index range of a double- or triple-click selection on a single line.
+ * sel_start_col is inclusive, sel_end_col is exclusive. */
+static int sel_active    = 0;
+static int sel_line      = -1;
+static int sel_start_col = 0;
+static int sel_end_col   = 0;
 
 static UndoOp *undo_buf = NULL;
 static int undo_head = 0;
@@ -862,6 +870,18 @@ void draw_screen(void) {
                 continue;
             }
 
+            /* Selection highlight (double- or triple-click) */
+            int in_sel = (sel_active && file_line_index == sel_line
+                          && j >= sel_start_col && j < sel_end_col);
+            if (in_sel) {
+                attron(COLOR_PAIR(PAIR_SELECT));
+                for (int b = 0; b < clen; b++) printw("%c", line[j + b]);
+                attroff(COLOR_PAIR(PAIR_SELECT));
+                current_phys_col += cw;
+                j += clen;
+                continue;
+            }
+
             while (span_idx < nspans && spans[span_idx].end <= j) span_idx++;
 
             int pair = 0;
@@ -1278,6 +1298,73 @@ static void process_line_ranges_interactive(int is_cut_mode) {
     }
 }
 
+/* ---------- Selection-based Copy / Cut / Paste ---------- */
+
+/* Copy the active mouse selection (a byte range on a single line) into
+ * clipboard_line.  Returns 1 on success, 0 if no selection is active. */
+static int copy_selection(void) {
+    if (!sel_active || sel_start_col >= sel_end_col) return 0;
+    int len = sel_end_col - sel_start_col;
+    free(clipboard_line);
+    clipboard_line = malloc(len + 2); /* text + '\n' + '\0' */
+    if (!clipboard_line) return 0;
+    memcpy(clipboard_line, lines[sel_line] + sel_start_col, len);
+    clipboard_line[len]     = '\n';
+    clipboard_line[len + 1] = '\0';
+    return 1;
+}
+
+/* Cut the active mouse selection: copy it then delete the bytes from the
+ * line.  Returns 1 on success, 0 if no selection is active. */
+static int cut_selection(void) {
+    if (!copy_selection()) return 0;
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot cut.");
+        return 0;
+    }
+    int len = (int)strlen(lines[sel_line]);
+    int cut_len = sel_end_col - sel_start_col;
+    save_undo_state_single(sel_line);
+    memmove(lines[sel_line] + sel_start_col,
+            lines[sel_line] + sel_end_col,
+            len - sel_end_col + 1);
+    /* Move cursor to start of the cut region */
+    current_line = sel_line;
+    cursor_x     = sel_start_col;
+    sel_active   = 0;
+    is_modified  = 1;
+    snprintf(status_msg, sizeof(status_msg), "Cut %d character(s).", cut_len);
+    return 1;
+}
+
+/* Paste clipboard_line inline at the current cursor position when the
+ * clipboard holds a single-line selection (no embedded newlines beyond the
+ * trailing one).  Falls back to the normal line-based paste otherwise. */
+static int paste_inline(void) {
+    if (!clipboard_line || clipboard_line[0] == '\0') return 0;
+    /* Count newlines — inline paste only if there is exactly one trailing \n */
+    int nl_count = 0;
+    for (const char *p = clipboard_line; *p; p++) if (*p == '\n') nl_count++;
+    if (nl_count != 1) return 0; /* multi-line: fall through to normal paste */
+    int ins_len = (int)strlen(clipboard_line) - 1; /* exclude trailing \n */
+    if (ins_len <= 0) return 0;
+    int cur_len = (int)strlen(lines[current_line]);
+    if (cur_len + ins_len >= MAX_LINE_LEN) {
+        snprintf(status_msg, sizeof(status_msg), "Paste would exceed line length limit.");
+        return 1; /* handled — don't fall through */
+    }
+    save_undo_state_single(current_line);
+    /* Make room */
+    memmove(lines[current_line] + cursor_x + ins_len,
+            lines[current_line] + cursor_x,
+            cur_len - cursor_x + 1);
+    memcpy(lines[current_line] + cursor_x, clipboard_line, ins_len);
+    cursor_x    += ins_len;
+    is_modified  = 1;
+    snprintf(status_msg, sizeof(status_msg), "Pasted %d character(s).", ins_len);
+    return 1;
+}
+
 void copy_lines_interactive(void) {
     char input[256];
     if (!prompt_input("Copy lines (e.g., 3, 5, 10-25 or !20-25): ", input, sizeof(input), 0)) return;
@@ -1546,7 +1633,7 @@ static void handle_mouse_event(void) {
             if (scroll_y < 0) scroll_y = 0;
             if (current_line < scroll_y) current_line = scroll_y;
             else if (current_line >= scroll_y + mdl) current_line = scroll_y + mdl - 1;
-        } else if (me.bstate & BUTTON1_PRESSED) {
+        } else if (me.bstate & (BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED | BUTTON1_TRIPLE_CLICKED)) {
             int click_row = (int)me.y;
             int click_col = (int)me.x;
             if (click_row >= 2 && click_row < LINES - 2) {
@@ -1567,6 +1654,54 @@ static void handle_mouse_event(void) {
                         current_line = i;
                         cursor_x = new_cx;
                         found = 1;
+
+                        if (me.bstate & BUTTON1_TRIPLE_CLICKED) {
+                            /* Triple-click: select entire line */
+                            sel_active    = 1;
+                            sel_line      = i;
+                            sel_start_col = 0;
+                            sel_end_col   = (int)strlen(lines[i]);
+                            cursor_x      = sel_end_col;
+                        } else if (me.bstate & BUTTON1_DOUBLE_CLICKED) {
+                            /* Double-click: select word or single non-space char
+                             * under the cursor.  cursor_x is a byte offset. */
+                            char *ln = lines[i];
+                            int blen = (int)strlen(ln);
+                            int cx = new_cx;
+                            if (cx > blen) cx = blen;
+                            /* Clamp to a valid byte boundary */
+                            if (cx == blen && blen > 0) cx = blen - 1;
+                            int start = cx, end = cx;
+                            if (blen > 0 && cx < blen) {
+                                unsigned char c = (unsigned char)ln[cx];
+                                int is_word = (c == '_' || (c < 0x80 ? isalnum(c) : 1));
+                                if (is_word) {
+                                    /* Expand left */
+                                    while (start > 0) {
+                                        unsigned char pc = (unsigned char)ln[start - 1];
+                                        if (!(pc == '_' || (pc < 0x80 ? isalnum(pc) : 1))) break;
+                                        start--;
+                                    }
+                                    /* Expand right */
+                                    while (end < blen) {
+                                        unsigned char nc = (unsigned char)ln[end];
+                                        if (!(nc == '_' || (nc < 0x80 ? isalnum(nc) : 1))) break;
+                                        end++;
+                                    }
+                                } else {
+                                    /* Non-word character: select just that char */
+                                    end = cx + 1;
+                                }
+                            }
+                            sel_active    = 1;
+                            sel_line      = i;
+                            sel_start_col = start;
+                            sel_end_col   = end;
+                            cursor_x      = end;
+                        } else {
+                            /* Single click: clear any active selection */
+                            sel_active = 0;
+                        }
                         break;
                     }
                     phys += vrows;
@@ -1574,6 +1709,7 @@ static void handle_mouse_event(void) {
                 if (!found && line_count > 0) {
                     current_line = line_count - 1;
                     cursor_x = (int)strlen(lines[current_line]);
+                    sel_active = 0;
                 }
             }
         }
@@ -2008,40 +2144,60 @@ int main(int argc, char *argv[]) {
             if (scroll_y < 0) scroll_y = 0;
         }
         else if (ch == CTRL_KEY('k') || ch == CTRL_KEY('K') || ch == 11) {
-            cut_lines_interactive();
+            /* If a mouse selection is active, cut just the selected text;
+             * otherwise fall back to the interactive line-range cut. */
+            if (sel_active) {
+                cut_selection();
+            } else {
+                cut_lines_interactive();
+            }
         }
-        else if (ch == CTRL_KEY('c') || ch == CTRL_KEY('C') || ch == 11) {
-            copy_lines_interactive();
+        else if (ch == CTRL_KEY('c') || ch == CTRL_KEY('C')) {
+            /* If a mouse selection is active, copy just the selected text;
+             * otherwise fall back to the interactive line-range copy. */
+            if (sel_active) {
+                if (copy_selection()) {
+                    int copied_len = sel_end_col - sel_start_col;
+                    sel_active = 0;
+                    snprintf(status_msg, sizeof(status_msg), "Copied %d character(s).", copied_len);
+                }
+            } else {
+                copy_lines_interactive();
+            }
         }
         else if (ch == CTRL_KEY('p')) {
             if (read_only_mode) {
                 snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot paste.");
             } else if (clipboard_line && strlen(clipboard_line) > 0) {
-                record_bulk(current_line, line_count - current_line);
+                /* Try inline paste first (single-line selection clipboard);
+                 * fall back to line-based paste for multi-line clipboard. */
+                if (!paste_inline()) {
+                    record_bulk(current_line, line_count - current_line);
 
-                const char *p = clipboard_line;
-                int inserted = 0;
+                    const char *p = clipboard_line;
+                    int inserted = 0;
 
-                while (*p != '\0') {
-                    const char *next_nl = strchr(p, '\n');
-                    size_t len = next_nl ? (size_t)(next_nl - p) : strlen(p);
+                    while (*p != '\0') {
+                        const char *next_nl = strchr(p, '\n');
+                        size_t len = next_nl ? (size_t)(next_nl - p) : strlen(p);
 
-                    char *line_buf = malloc(len + 1);
-                    if (line_buf) {
-                        memcpy(line_buf, p, len);
-                        line_buf[len] = '\0';
-                        insert_line_at(current_line + inserted, line_buf);
-                        free(line_buf);
-                        inserted++;
+                        char *line_buf = malloc(len + 1);
+                        if (line_buf) {
+                            memcpy(line_buf, p, len);
+                            line_buf[len] = '\0';
+                            insert_line_at(current_line + inserted, line_buf);
+                            free(line_buf);
+                            inserted++;
+                        }
+
+                        if (!next_nl) break;
+                        p = next_nl + 1;
                     }
 
-                    if (!next_nl) break;
-                    p = next_nl + 1;
+                    cursor_x = 0;
+                    is_modified = 1;
+                    snprintf(status_msg, sizeof(status_msg), "Pasted %d line(s).", inserted);
                 }
-
-                cursor_x = 0;
-                is_modified = 1;
-                snprintf(status_msg, sizeof(status_msg), "Pasted %d line(s).", inserted);
             } else {
                 snprintf(status_msg, sizeof(status_msg), "Clipboard is empty.");
             }

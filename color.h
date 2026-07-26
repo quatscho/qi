@@ -13,7 +13,8 @@ typedef enum {
     PAIR_GREEN      = 5, /* Active gutter line / RW Mode */
     PAIR_YELLOW_ALT = 6, /* Alternate accent */
     PAIR_MATCH      = 7, /* Bracket matching highlight */
-    PAIR_BLUE       = 8  /* Auxiliary UI elements */
+    PAIR_BLUE       = 8, /* Auxiliary UI elements */
+    PAIR_SELECT     = 9  /* Mouse double/triple-click selection highlight */
 } QiColorPair;
 
 /* Initialize ncurses colors and color pairs */
