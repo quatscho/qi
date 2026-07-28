@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.53 (2026)
+ * Version: 1.1.54 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -30,7 +30,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.53"
+#define VERSION "1.1.54"
 
 /* Define keycode for ALT/OPT+S */
 #ifndef KEY_ALT_S
@@ -1809,6 +1809,88 @@ static void handle_enter_key(int paste_batch_active) {
     }
 }
 
+/* Insert a multi-byte UTF-8 sequence (2–4 bytes) at the cursor.
+ * lead_byte is the first byte already read from getch().
+ * Uses a bulk-line undo snapshot (same as paste) rather than per-byte undo. */
+static void handle_utf8_char(int lead_byte, int paste_batch_active) {
+    if (read_only_mode) {
+        snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
+        return;
+    }
+
+    /* Determine expected sequence length from the lead byte */
+    unsigned char ub = (unsigned char)lead_byte;
+    int seq_len;
+    if      ((ub & 0xF8) == 0xF0) seq_len = 4;
+    else if ((ub & 0xF0) == 0xE0) seq_len = 3;
+    else if ((ub & 0xE0) == 0xC0) seq_len = 2;
+    else return; /* not a valid UTF-8 lead byte */
+
+    char seq[5] = {0};
+    seq[0] = (char)lead_byte;
+
+    /* Read the continuation bytes with a short timeout */
+    nodelay(stdscr, TRUE);
+    for (int i = 1; i < seq_len; i++) {
+        int c = getch();
+        if (c == ERR || (c & 0xC0) != 0x80) {
+            /* Incomplete or invalid sequence — discard */
+            nodelay(stdscr, FALSE);
+            return;
+        }
+        seq[i] = (char)c;
+    }
+    nodelay(stdscr, FALSE);
+
+    int len = (int)strlen(lines[current_line]);
+    if (len + seq_len >= MAX_LINE_LEN) {
+        snprintf(status_msg, sizeof(status_msg), "Line too long.");
+        return;
+    }
+
+    if (!paste_batch_active) {
+        save_undo_state_single(current_line);
+    }
+
+    if (overwrite_mode && cursor_x < len) {
+        /* In overwrite mode, replace the UTF-8 character at cursor_x.
+         * Determine the byte length of the character being overwritten. */
+        unsigned char ob = (unsigned char)lines[current_line][cursor_x];
+        int old_len = 1;
+        if      ((ob & 0xF8) == 0xF0) old_len = 4;
+        else if ((ob & 0xF0) == 0xE0) old_len = 3;
+        else if ((ob & 0xE0) == 0xC0) old_len = 2;
+        int delta = seq_len - old_len;
+        if (len + delta >= MAX_LINE_LEN) {
+            snprintf(status_msg, sizeof(status_msg), "Line too long.");
+            return;
+        }
+        char *nl = malloc(len + delta + 1);
+        if (!nl) return;
+        memcpy(nl, lines[current_line], cursor_x);
+        memcpy(nl + cursor_x, seq, seq_len);
+        memcpy(nl + cursor_x + seq_len,
+               lines[current_line] + cursor_x + old_len,
+               len - cursor_x - old_len + 1);
+        free(lines[current_line]); lines[current_line] = nl;
+    } else {
+        char *nl = malloc(len + seq_len + 1);
+        if (!nl) return;
+        memcpy(nl, lines[current_line], cursor_x);
+        memcpy(nl + cursor_x, seq, seq_len);
+        memcpy(nl + cursor_x + seq_len,
+               lines[current_line] + cursor_x,
+               len - cursor_x + 1);
+        free(lines[current_line]); lines[current_line] = nl;
+    }
+
+    tracker_set_modified(current_line, cursor_x, 1);
+    cursor_x += seq_len;
+    is_modified = 1;
+    mod_count++;
+    if (mod_count >= 50) { auto_save(); mod_count = 0; }
+}
+
 static void handle_printable_char(int ch, int paste_batch_active) {
     if (read_only_mode) {
         snprintf(status_msg, sizeof(status_msg), "File is Read-Only! Cannot modify.");
@@ -2357,6 +2439,12 @@ int main(int argc, char *argv[]) {
         }
         else if (ch >= 32 && ch <= 126) {
             handle_printable_char(ch, paste_batch_active);
+        }
+        /* Multi-byte UTF-8: lead byte 0xC0–0xFF arrives as a positive int
+         * from getch() when ncurses is in raw/noecho mode with setlocale set.
+         * Collect the continuation bytes and insert the full sequence. */
+        else if (ch >= 0xC0 && ch <= 0xFF) {
+            handle_utf8_char(ch, paste_batch_active);
         }
     }
 
