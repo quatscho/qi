@@ -1512,17 +1512,45 @@ static char *run_command(const char *cmd, size_t *out_len) {
  * if they pressed ESC. */
 static int prompt_input_win(WINDOW *w, int row, int col, int max_w,
                             const char *prompt, char *buf, size_t buf_size) {
-    int idx = 0;
+    int idx = 0;   /* byte length of buf */
     buf[0] = '\0';
     int plen = (int)strlen(prompt);
+    /* Visible field width — stays strictly inside the border.
+     * col is the left margin (e.g. 2), so the field must end before
+     * win_w - 1 (the right border column).  max_w is inner_w = win_w - 4,
+     * so col + plen + field_w <= col + max_w - 1 is always safe. */
+    int field_w = max_w - plen - 1;
+    if (field_w < 4) field_w = 4;
+    int view_off = 0;  /* scroll offset: first visible char index in buf */
 
-    wattron(w, A_BOLD);
-    mvwprintw(w, row, col, "%s", prompt);
-    wattroff(w, A_BOLD);
-    wclrtoeol(w);
-    wmove(w, row, col + plen);
-    wrefresh(w);
     noecho();
+
+    /* Helper lambda (inline) — redraw the prompt + scrolling field. */
+#define PIWIN_REDRAW() do { \
+        int blen = (int)strlen(buf); \
+        /* Advance view_off so cursor stays in field */ \
+        if (idx - view_off >= field_w) view_off = idx - field_w + 1; \
+        if (view_off > idx) view_off = idx; \
+        if (view_off < 0)  view_off = 0; \
+        /* Draw prompt (bold) */ \
+        wattron(w, A_BOLD); \
+        mvwprintw(w, row, col, "%s", prompt); \
+        wattroff(w, A_BOLD); \
+        /* Draw visible slice of buf, padded to field_w with spaces */ \
+        char _vis[512]; \
+        int _vlen = blen - view_off; \
+        if (_vlen < 0) _vlen = 0; \
+        if (_vlen > field_w) _vlen = field_w; \
+        memcpy(_vis, buf + view_off, (size_t)_vlen); \
+        memset(_vis + _vlen, ' ', (size_t)(field_w - _vlen)); \
+        _vis[field_w] = '\0'; \
+        mvwaddnstr(w, row, col + plen, _vis, field_w); \
+        /* Cursor position within the field */ \
+        wmove(w, row, col + plen + (idx - view_off)); \
+        wrefresh(w); \
+    } while (0)
+
+    PIWIN_REDRAW();
 
     while (idx < (int)buf_size - 1) {
         int ch = wgetch(w);
@@ -1544,14 +1572,10 @@ static int prompt_input_win(WINDOW *w, int row, int col, int max_w,
             break;
         } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (idx > 0) {
-                /* Step back over a UTF-8 sequence */
                 idx--;
                 while (idx > 0 && (buf[idx] & 0xC0) == 0x80) idx--;
                 buf[idx] = '\0';
-                /* Redraw prompt + buffer */
-                mvwprintw(w, row, col, "%s%-*s", prompt, max_w - plen, buf);
-                wmove(w, row, col + plen + (int)strlen(buf));
-                wrefresh(w);
+                PIWIN_REDRAW();
             }
         } else if (ch >= 0xC0 && ch <= 0xFF) {
             /* Multi-byte UTF-8 lead byte */
@@ -1568,18 +1592,15 @@ static int prompt_input_win(WINDOW *w, int row, int col, int max_w,
                 }
                 nodelay(w, FALSE);
                 buf[idx] = '\0';
-                mvwprintw(w, row, col, "%s%-*s", prompt, max_w - plen, buf);
-                wmove(w, row, col + plen + (int)strlen(buf));
-                wrefresh(w);
+                PIWIN_REDRAW();
             }
         } else if (ch >= 32 && ch <= 126) {
             buf[idx++] = (char)ch;
             buf[idx] = '\0';
-            mvwprintw(w, row, col, "%s%-*s", prompt, max_w - plen, buf);
-            wmove(w, row, col + plen + idx);
-            wrefresh(w);
+            PIWIN_REDRAW();
         }
     }
+#undef PIWIN_REDRAW
     return (strlen(buf) > 0);
 }
 
