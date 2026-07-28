@@ -1,7 +1,7 @@
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
- * Version: 1.1.54 (2026)
+ * Version: 1.1.55 (2026)
  * License: GPL version 3
  *
  * A minimalist, ncurses-based text editor featuring dynamic line counting,
@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <locale.h>
 #include <wchar.h>
+#include <errno.h>
 #include "tracker.h"
 #include "syntax.h"
 #include "color.h"
@@ -30,11 +31,14 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAX_UNDO 500
 #define UNDO_CAP MAX_UNDO
-#define VERSION "1.1.54"
+#define VERSION "1.1.55"
 
-/* Define keycode for ALT/OPT+S */
+/* Define keycodes for ALT/OPT key combos */
 #ifndef KEY_ALT_S
 #define KEY_ALT_S 0x1fe
+#endif
+#ifndef KEY_ALT_G
+#define KEY_ALT_G 0x1fd
 #endif
 
 /* BUTTON5_PRESSED is absent from macOS system ncurses 5.7; fall back to
@@ -123,6 +127,7 @@ void undo(void);
 void redo_op(void);
 void draw_screen(void);
 void show_about_window(void);
+void show_command_window(const char *prefill);
 void save_file(void);
 void save_as_file(void);
 
@@ -1447,7 +1452,406 @@ void copy_lines_interactive(void) {
 void delete_lines_interactive(void) { process_line_ranges_interactive(0); }
 void cut_lines_interactive(void) { process_line_ranges_interactive(1); }
 
-/* ---------- About Dialog ---------- */
+/* ---------- Command Execution Popup ---------- */
+
+/* Run a shell command and return its stdout+stderr in a heap-allocated,
+ * null-terminated buffer.  *out_len receives the byte count (excluding the
+ * terminator).  Caller must free() the returned pointer.  Returns NULL on
+ * allocation failure.  Output is capped at CMD_OUT_MAX bytes; a truncation
+ * notice is appended when the cap is hit. */
+#define CMD_OUT_MAX (256 * 1024)
+static char *run_command(const char *cmd, size_t *out_len) {
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        char *err = malloc(128);
+        if (err) snprintf(err, 128, "popen failed: %s", strerror(errno));
+        if (out_len) *out_len = err ? strlen(err) : 0;
+        return err;
+    }
+
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) { pclose(fp); return NULL; }
+
+    int truncated = 0;
+    char tmp[512];
+    while (fgets(tmp, sizeof(tmp), fp)) {
+        size_t n = strlen(tmp);
+        if (len + n + 1 > CMD_OUT_MAX) {
+            truncated = 1;
+            break;
+        }
+        if (len + n + 1 > cap) {
+            cap = (cap * 2 > len + n + 1) ? cap * 2 : len + n + 1 + 512;
+            char *nb = realloc(buf, cap);
+            if (!nb) { free(buf); pclose(fp); return NULL; }
+            buf = nb;
+        }
+        memcpy(buf + len, tmp, n);
+        len += n;
+    }
+    pclose(fp);
+
+    if (truncated) {
+        const char *notice = "\n[output truncated at 256 KB]";
+        size_t nl = strlen(notice);
+        if (len + nl + 1 <= cap || (buf = realloc(buf, len + nl + 1)) != NULL) {
+            memcpy(buf + len, notice, nl);
+            len += nl;
+        }
+    }
+
+    buf[len] = '\0';
+    if (out_len) *out_len = len;
+    return buf;
+}
+
+/* A variant of prompt_input() that draws the prompt inside a WINDOW * on the
+ * given row, rather than on the stdscr status bar.  Supports backspace, ESC,
+ * Enter, and the full UTF-8 input path.  Returns 1 if the user confirmed, 0
+ * if they pressed ESC. */
+static int prompt_input_win(WINDOW *w, int row, int col, int max_w,
+                            const char *prompt, char *buf, size_t buf_size) {
+    int idx = 0;
+    buf[0] = '\0';
+    int plen = (int)strlen(prompt);
+
+    wattron(w, A_BOLD);
+    mvwprintw(w, row, col, "%s", prompt);
+    wattroff(w, A_BOLD);
+    wclrtoeol(w);
+    wmove(w, row, col + plen);
+    wrefresh(w);
+    noecho();
+
+    while (idx < (int)buf_size - 1) {
+        int ch = wgetch(w);
+        if (ch == 27) {
+            /* Drain any escape sequence */
+            nodelay(w, TRUE);
+            int n1 = wgetch(w);
+            if (n1 == '[') {
+                int n2 = wgetch(w);
+                if (n2 == '2') {
+                    int sc;
+                    while ((sc = wgetch(w)) != ERR && sc != '~');
+                }
+            }
+            nodelay(w, FALSE);
+            buf[0] = '\0';
+            return 0;
+        } else if (ch == 10 || ch == 13) {
+            break;
+        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (idx > 0) {
+                /* Step back over a UTF-8 sequence */
+                idx--;
+                while (idx > 0 && (buf[idx] & 0xC0) == 0x80) idx--;
+                buf[idx] = '\0';
+                /* Redraw prompt + buffer */
+                mvwprintw(w, row, col, "%s%-*s", prompt, max_w - plen, buf);
+                wmove(w, row, col + plen + (int)strlen(buf));
+                wrefresh(w);
+            }
+        } else if (ch >= 0xC0 && ch <= 0xFF) {
+            /* Multi-byte UTF-8 lead byte */
+            unsigned char ub = (unsigned char)ch;
+            int seq_len = (ub & 0xF8) == 0xF0 ? 4 :
+                          (ub & 0xF0) == 0xE0 ? 3 : 2;
+            if (idx + seq_len < (int)buf_size - 1) {
+                buf[idx++] = (char)ch;
+                nodelay(w, TRUE);
+                for (int i = 1; i < seq_len; i++) {
+                    int c = wgetch(w);
+                    if (c == ERR || (c & 0xC0) != 0x80) { idx--; break; }
+                    buf[idx++] = (char)c;
+                }
+                nodelay(w, FALSE);
+                buf[idx] = '\0';
+                mvwprintw(w, row, col, "%s%-*s", prompt, max_w - plen, buf);
+                wmove(w, row, col + plen + (int)strlen(buf));
+                wrefresh(w);
+            }
+        } else if (ch >= 32 && ch <= 126) {
+            buf[idx++] = (char)ch;
+            buf[idx] = '\0';
+            mvwprintw(w, row, col, "%s%-*s", prompt, max_w - plen, buf);
+            wmove(w, row, col + plen + idx);
+            wrefresh(w);
+        }
+    }
+    return (strlen(buf) > 0);
+}
+
+/* Split a null-terminated string into an array of line pointers.
+ * The source string is modified in-place (newlines replaced with '\0').
+ * Returns the number of lines.  The returned array must be free()d but
+ * the individual pointers point into src and must NOT be freed. */
+static char **split_lines(char *src, int *count) {
+    int cap = 64, n = 0;
+    char **lines = malloc(cap * sizeof(char *));
+    if (!lines) { *count = 0; return NULL; }
+    lines[n++] = src;
+    for (char *p = src; *p; p++) {
+        if (*p == '\n') {
+            *p = '\0';
+            if (n >= cap) {
+                cap *= 2;
+                char **nl = realloc(lines, cap * sizeof(char *));
+                if (!nl) break;
+                lines = nl;
+            }
+            lines[n++] = p + 1;
+        }
+    }
+    /* Drop a trailing empty line that results from a trailing newline */
+    if (n > 0 && lines[n - 1][0] == '\0') n--;
+    *count = n;
+    return lines;
+}
+
+void show_command_window(const char *prefill) {
+    int git_mode = (strncmp(prefill, "git ", 4) == 0 || strcmp(prefill, "git") == 0
+                    || prefill[0] == '\0' /* free-form — no git shortcuts */ ? 0 : 0);
+    /* Determine git mode: prefill starts with "git " */
+    git_mode = (strncmp(prefill, "git ", 4) == 0);
+
+    /* Window dimensions: 80% wide, 70% tall, min 40x12 */
+    int win_w = (COLS  * 4) / 5;  if (win_w < 40) win_w = 40;
+    int win_h = (LINES * 7) / 10; if (win_h < 12) win_h = 12;
+    if (win_w > COLS  - 2) win_w = COLS  - 2;
+    if (win_h > LINES - 2) win_h = LINES - 2;
+    int start_y = (LINES - win_h) / 2;
+    int start_x = (COLS  - win_w) / 2;
+
+    WINDOW *cw = newwin(win_h, win_w, start_y, start_x);
+    keypad(cw, TRUE);
+
+    /* Output area: rows 1..(win_h-4), prompt on row (win_h-2) */
+    int body_h   = win_h - 4;  /* rows available for output */
+    int prompt_y = win_h - 2;
+    int inner_w  = win_w - 4;  /* usable width inside the border */
+
+    char cmd_buf[512] = "";
+    /* Pre-fill the command buffer */
+    if (prefill && *prefill)
+        snprintf(cmd_buf, sizeof(cmd_buf), "%s", prefill);
+
+    char  *out_buf   = NULL;   /* heap buffer from run_command() */
+    char **out_lines = NULL;   /* array of line pointers into out_buf */
+    int    out_count = 0;      /* number of output lines */
+    int    scroll    = 0;      /* first visible output line */
+    int    ran       = 0;      /* 1 after a command has been run */
+
+    for (;;) {
+        werase(cw);
+        box(cw, 0, 0);
+
+        /* Title */
+        {
+            const char *title = git_mode ? " GIT " : " COMMAND ";
+            int tlen = (int)strlen(title);
+            int tx   = (win_w - tlen) / 2;
+            mvwaddch(cw, 0, tx - 1,    ACS_RTEE);
+            mvwaddch(cw, 0, tx + tlen, ACS_LTEE);
+            wattron(cw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+            mvwprintw(cw, 0, tx, "%s", title);
+            wattroff(cw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+        }
+
+        /* Output body */
+        if (ran) {
+            for (int i = 0; i < body_h; i++) {
+                int li = scroll + i;
+                if (li >= out_count) break;
+                /* Truncate to inner_w display columns */
+                char tmp[512];
+                snprintf(tmp, sizeof(tmp), "%.*s", inner_w, out_lines[li]);
+                mvwprintw(cw, 1 + i, 2, "%s", tmp);
+            }
+            /* Scroll indicators */
+            if (scroll > 0)
+                mvwprintw(cw, 1, win_w - 4, " ^ ");
+            if (scroll + body_h < out_count)
+                mvwprintw(cw, body_h, win_w - 4, " v ");
+        } else if (!ran && git_mode) {
+            /* Show git shortcut hints in the body before first run */
+            int hint_y = body_h / 2 - 1;
+            if (hint_y < 1) hint_y = 1;
+            wattron(cw, A_DIM);
+            mvwprintw(cw, hint_y,     2, "Quick shortcuts (press when prompt is empty):");
+            mvwprintw(cw, hint_y + 1, 4, "s  status     l  log --oneline -20");
+            mvwprintw(cw, hint_y + 2, 4, "d  diff       a  add -p");
+            mvwprintw(cw, hint_y + 3, 4, "c  commit     p  push");
+            wattroff(cw, A_DIM);
+        }
+
+        /* Separator line above footer */
+        for (int x = 1; x < win_w - 1; x++)
+            mvwaddch(cw, win_h - 3, x, ACS_HLINE);
+        mvwaddch(cw, win_h - 3, 0,         ACS_LTEE);
+        mvwaddch(cw, win_h - 3, win_w - 1, ACS_RTEE);
+
+        /* Footer: git shortcuts or generic hint */
+        wattron(cw, A_DIM);
+        if (git_mode)
+            mvwprintw(cw, win_h - 3 + 1, 2,
+                      "s status  l log  d diff  a add -p  c commit  p push");
+        else
+            mvwprintw(cw, win_h - 3 + 1, 2, "Enter to run  ESC to close");
+        wattroff(cw, A_DIM);
+
+        wrefresh(cw);
+
+        /* Prompt — collect command */
+        char new_cmd[512] = "";
+        if (prefill && *prefill && !ran)
+            snprintf(new_cmd, sizeof(new_cmd), "%s", prefill);
+
+        int confirmed = prompt_input_win(cw, prompt_y, 2, inner_w,
+                                         "> ", new_cmd, sizeof(new_cmd));
+        if (!confirmed && new_cmd[0] == '\0') {
+            /* ESC with empty buffer — close */
+            break;
+        }
+
+        /* Git mode single-key shortcuts (only when buffer is a single char) */
+        if (git_mode && strlen(new_cmd) == 1) {
+            char sc = new_cmd[0];
+            if      (sc == 's') snprintf(new_cmd, sizeof(new_cmd), "git status");
+            else if (sc == 'l') snprintf(new_cmd, sizeof(new_cmd), "git log --oneline -20");
+            else if (sc == 'd') snprintf(new_cmd, sizeof(new_cmd), "git diff");
+            else if (sc == 'a') snprintf(new_cmd, sizeof(new_cmd), "git add -p");
+            else if (sc == 'p') snprintf(new_cmd, sizeof(new_cmd), "git push");
+            else if (sc == 'c') {
+                /* Inline commit: prompt for message then run git commit -m */
+                char msg[256] = "";
+                werase(cw); box(cw, 0, 0);
+                wattron(cw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+                mvwprintw(cw, 0, (win_w - 5) / 2, " GIT ");
+                wattroff(cw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+                wattron(cw, A_DIM);
+                mvwprintw(cw, 2, 2, "Enter commit message (ESC to cancel):");
+                wattroff(cw, A_DIM);
+                wrefresh(cw);
+                if (prompt_input_win(cw, 4, 2, inner_w, "msg: ", msg, sizeof(msg)) && msg[0]) {
+                    snprintf(new_cmd, sizeof(new_cmd), "git commit -m \"%s\"", msg);
+                } else {
+                    /* Cancelled */
+                    prefill = "git ";
+                    continue;
+                }
+            }
+        }
+
+        if (new_cmd[0] == '\0') continue;
+
+        /* Build shell command with 2>&1 */
+        char shell_cmd[600];
+        snprintf(shell_cmd, sizeof(shell_cmd), "%s 2>&1", new_cmd);
+
+        /* Run and capture */
+        free(out_buf);
+        free(out_lines);
+        out_buf   = NULL;
+        out_lines = NULL;
+        out_count = 0;
+        scroll    = 0;
+        ran       = 1;
+
+        size_t out_len = 0;
+        out_buf = run_command(shell_cmd, &out_len);
+        if (out_buf) {
+            out_lines = split_lines(out_buf, &out_count);
+        }
+
+        /* After running, stay in the loop to show output and allow
+         * another command or ESC to close. */
+        prefill = "";  /* clear prefill so next prompt starts empty */
+
+        /* Show output; let user scroll or press any non-arrow key to
+         * run another command or close. */
+        for (;;) {
+            werase(cw);
+            box(cw, 0, 0);
+
+            /* Title */
+            {
+                const char *title = git_mode ? " GIT " : " COMMAND ";
+                int tlen = (int)strlen(title);
+                int tx   = (win_w - tlen) / 2;
+                mvwaddch(cw, 0, tx - 1,    ACS_RTEE);
+                mvwaddch(cw, 0, tx + tlen, ACS_LTEE);
+                wattron(cw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+                mvwprintw(cw, 0, tx, "%s", title);
+                wattroff(cw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+            }
+
+            /* Command echo */
+            wattron(cw, A_DIM);
+            mvwprintw(cw, 1, 2, "$ %.*s", inner_w - 2, new_cmd);
+            wattroff(cw, A_DIM);
+
+            /* Output lines */
+            for (int i = 0; i < body_h - 1; i++) {
+                int li = scroll + i;
+                if (li >= out_count) break;
+                char tmp[512];
+                snprintf(tmp, sizeof(tmp), "%.*s", inner_w, out_lines[li]);
+                mvwprintw(cw, 2 + i, 2, "%s", tmp);
+            }
+            if (scroll > 0)
+                mvwprintw(cw, 2, win_w - 4, " ^ ");
+            if (scroll + body_h - 1 < out_count)
+                mvwprintw(cw, body_h, win_w - 4, " v ");
+
+            /* Separator + footer */
+            for (int x = 1; x < win_w - 1; x++)
+                mvwaddch(cw, win_h - 3, x, ACS_HLINE);
+            mvwaddch(cw, win_h - 3, 0,         ACS_LTEE);
+            mvwaddch(cw, win_h - 3, win_w - 1, ACS_RTEE);
+            wattron(cw, A_DIM);
+            mvwprintw(cw, win_h - 2, 2,
+                      "Arrow keys to scroll  |  Enter for new command  |  ESC to close");
+            wattroff(cw, A_DIM);
+
+            wrefresh(cw);
+
+            int k = wgetch(cw);
+            if (k == KEY_UP   || k == 'k') { if (scroll > 0) scroll--; }
+            else if (k == KEY_DOWN || k == 'j') {
+                if (scroll + body_h - 1 < out_count) scroll++;
+            }
+            else if (k == KEY_PPAGE) {
+                scroll -= body_h - 1;
+                if (scroll < 0) scroll = 0;
+            }
+            else if (k == KEY_NPAGE) {
+                scroll += body_h - 1;
+                if (scroll + body_h - 1 > out_count) scroll = out_count - body_h + 1;
+                if (scroll < 0) scroll = 0;
+            }
+            else if (k == 27 || k == 'q') {
+                /* ESC or q: close the popup entirely */
+                goto cmd_done;
+            }
+            else if (k == 10 || k == 13) {
+                /* Enter: break inner loop to show prompt again */
+                break;
+            }
+            /* Any other key: treat as Enter (run another command) */
+            else { break; }
+        }
+    }
+
+cmd_done:
+    free(out_buf);
+    free(out_lines);
+    delwin(cw);
+    touchwin(stdscr);
+    refresh();
+}
+
 void show_about_window(void) {
     int height = 15;
     int width = 60;
@@ -1532,6 +1936,10 @@ void show_help_window(void) {
         { "Ctrl+X",        "Toggle Overwrite Mode",      0 },
         { "Ctrl+?",        "This help screen",           0 },
         { "Alt/Opt+A",     "Show About dialog",          0 },
+        { "",              "",                            0 },
+        { "COMMAND",       NULL,                         1 },
+        { "Ctrl+Shift+\\", "Command popup",              0 },
+        { "Alt/Opt+G",     "Git popup",                  0 },
     };
     int total = (int)(sizeof(entries) / sizeof(entries[0]));
 
@@ -1971,8 +2379,9 @@ int main(int argc, char *argv[]) {
     noecho();
     keypad(stdscr, TRUE);
 
-    /* Bind terminal escape sequence for ALT/OPT+S */
+    /* Bind terminal escape sequences for ALT/OPT combos */
     define_key("\033s", KEY_ALT_S);
+    define_key("\033g", KEY_ALT_G);
 
     printf("\033[?2004h");
     fflush(stdout);
@@ -2205,6 +2614,8 @@ int main(int argc, char *argv[]) {
         }
         else if (ch == CTRL_KEY('f')) find_text();
         else if (ch == CTRL_KEY('?')) show_help_window();
+        else if (ch == 28)                show_command_window("");   /* Ctrl+\ */
+        else if (ch == KEY_ALT_G)         show_command_window("git ");
         else if (ch == CTRL_KEY('r')) replace_text();
         else if (ch == CTRL_KEY('g')) goto_line();
         else if (ch == CTRL_KEY('u')) undo();
