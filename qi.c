@@ -1681,7 +1681,7 @@ void show_command_window(const char *prefill) {
             wattron(cw, A_DIM);
             mvwprintw(cw, hint_y,     2, "Quick shortcuts (press when prompt is empty):");
             mvwprintw(cw, hint_y + 1, 4, "s  status     l  log --oneline -20");
-            mvwprintw(cw, hint_y + 2, 4, "d  diff       a  add -p");
+            mvwprintw(cw, hint_y + 2, 4, "d  diff       a  add <path>");
             mvwprintw(cw, hint_y + 3, 4, "c  commit     p  push");
             wattroff(cw, A_DIM);
         }
@@ -1696,7 +1696,7 @@ void show_command_window(const char *prefill) {
         wattron(cw, A_DIM);
         if (git_mode)
             mvwprintw(cw, win_h - 3 + 1, 2,
-                      "s status  l log  d diff  a add -p  c commit  p push");
+                      "s status  l log  d diff  a add  c commit  p push");
         else
             mvwprintw(cw, win_h - 3 + 1, 2, "Enter to run  ESC to close");
         wattroff(cw, A_DIM);
@@ -1721,7 +1721,24 @@ void show_command_window(const char *prefill) {
             if      (sc == 's') snprintf(new_cmd, sizeof(new_cmd), "git status");
             else if (sc == 'l') snprintf(new_cmd, sizeof(new_cmd), "git log --oneline -20");
             else if (sc == 'd') snprintf(new_cmd, sizeof(new_cmd), "git diff");
-            else if (sc == 'a') snprintf(new_cmd, sizeof(new_cmd), "git add -p");
+            else if (sc == 'a') {
+                /* Prompt for path(s) to stage, e.g. "." or "qi.c" */
+                char path[256] = "";
+                werase(cw); box(cw, 0, 0);
+                wattron(cw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+                mvwprintw(cw, 0, (win_w - 5) / 2, " GIT ");
+                wattroff(cw, COLOR_PAIR(PAIR_YELLOW) | A_BOLD);
+                wattron(cw, A_DIM);
+                mvwprintw(cw, 2, 2, "Path to stage (e.g. .  qi.c  subdir/file.c):");
+                wattroff(cw, A_DIM);
+                wrefresh(cw);
+                if (prompt_input_win(cw, 4, 2, inner_w, "add: ", path, sizeof(path)) && path[0]) {
+                    snprintf(new_cmd, sizeof(new_cmd), "git add %s", path);
+                } else {
+                    prefill = "git ";
+                    continue;
+                }
+            }
             else if (sc == 'p') snprintf(new_cmd, sizeof(new_cmd), "git push");
             else if (sc == 'c') {
                 /* Inline commit: prompt for message then run git commit -m */
