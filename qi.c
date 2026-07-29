@@ -1,3 +1,7 @@
+
+
+
+
 /*
  * qi - A Lightweight Terminal Text Editor
  * Author: Christopher Camacho
